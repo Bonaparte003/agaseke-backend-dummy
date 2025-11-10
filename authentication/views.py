@@ -26,10 +26,15 @@ from reportlab.lib.units import inch
 from reportlab.pdfgen import canvas
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 
-from .forms import SignUpForm, ProductReviewForm
-from .models import User, Post, Purchase, Bookmark, ProductImage, UserQRCode, OTPVerification, ProductReview
+from users.forms import SignUpForm
+from posts.forms import ProductReviewForm
+from users.models import User
+from posts.models import Post, ProductReview, Bookmark
+from products.models import Purchase, ProductImage
+from .models import UserQRCode, OTPVerification
 from .qr_utils import update_user_qr_code, decode_qr_data, get_user_purchases_from_qr
 from .otp_utils import create_otp, verify_otp
+from .jwt_utils import get_tokens_for_user, get_user_from_token, refresh_access_token
 from django.views.decorators.csrf import csrf_exempt
 
 def generate_csv_report(data, filename, headers):
@@ -143,18 +148,28 @@ def register_api(request):
         if form.is_valid():
             user = form.save()
             
-            # Return success response with user data
+            # Generate JWT tokens
+            tokens = get_tokens_for_user(user)
+            
+            # Return success response with user data and JWT tokens
             return JsonResponse({
                 'success': True,
                 'message': 'Account created successfully',
                 'data': {
-                    'user_id': user.id,
-                    'username': user.username,
-                    'email': user.email,
-                    'first_name': user.first_name,
-                    'last_name': user.last_name,
-                    'role': user.role,
-                    'is_vendor_role': user.is_vendor_role
+                    'user': {
+                        'id': user.id,
+                        'username': user.username,
+                        'email': user.email,
+                        'first_name': user.first_name,
+                        'last_name': user.last_name,
+                        'role': user.role,
+                        'is_vendor_role': user.is_vendor_role,
+                        'phone_number': getattr(user, 'phone_number', '') or '',
+                    },
+                    'tokens': {
+                        'access': tokens['access'],
+                        'refresh': tokens['refresh'],
+                    }
                 }
             }, status=201)  # 201 for successful creation
         else:
@@ -226,61 +241,35 @@ def login_api(request):
         
         if user is not None:
             if user.is_active:
-                # Optional: Create authentication token for future API requests
-                # You can use Django's built-in Token authentication or create your own
-                try:
-                    from django.contrib.auth.models import update_last_login
-                    from rest_framework.authtoken.models import Token
-                    
-                    # Update last login time
-                    update_last_login(None, user)
-                    
-                    # Get or create authentication token
-                    token, created = Token.objects.get_or_create(user=user)
-                    
-                    # Return successful login response with user data and token
-                    return JsonResponse({
-                        'success': True,
-                        'message': 'Login successful',
-                        'data': {
-                            'user': {
-                                'id': user.id,
-                                'username': user.username,
-                                'email': user.email,
-                                'first_name': user.first_name,
-                                'last_name': user.last_name,
-                                'role': user.role,
-                                'is_vendor_role': user.is_vendor_role,
-                                'phone_number': getattr(user, 'phone_number', ''),
-                                'last_login': user.last_login.isoformat() if user.last_login else None
-                            },
-                            'auth': {
-                                'token': token.key,
-                                'token_type': 'Bearer',
-                                'expires_in': '30 days'  # Or your token expiry logic
-                            }
+                # Update last login time
+                from django.contrib.auth.models import update_last_login
+                update_last_login(None, user)
+                
+                # Generate JWT tokens
+                tokens = get_tokens_for_user(user)
+                
+                # Return successful login response with user data and JWT tokens
+                return JsonResponse({
+                    'success': True,
+                    'message': 'Login successful',
+                    'data': {
+                        'user': {
+                            'id': user.id,
+                            'username': user.username,
+                            'email': user.email,
+                            'first_name': user.first_name,
+                            'last_name': user.last_name,
+                            'role': user.role,
+                            'is_vendor_role': user.is_vendor_role,
+                            'phone_number': getattr(user, 'phone_number', '') or '',
+                            'last_login': user.last_login.isoformat() if user.last_login else None
+                        },
+                        'tokens': {
+                            'access': tokens['access'],
+                            'refresh': tokens['refresh'],
                         }
-                    }, status=200)
-                    
-                except ImportError:
-                    # Fallback if DRF is not installed - return without token
-                    return JsonResponse({
-                        'success': True,
-                        'message': 'Login successful',
-                        'data': {
-                            'user': {
-                                'id': user.id,
-                                'username': user.username,
-                                'email': user.email,
-                                'first_name': user.first_name,
-                                'last_name': user.last_name,
-                                'role': user.role,
-                                'is_vendor_role': user.is_vendor_role,
-                                'phone_number': getattr(user, 'phone_number', ''),
-                                'last_login': user.last_login.isoformat() if user.last_login else None
-                            }
-                        }
-                    }, status=200)
+                    }
+                }, status=200)
                     
             else:
                 # User account is disabled
@@ -323,18 +312,82 @@ def logout_view(request):
 @csrf_exempt
 @require_http_methods(['POST'])
 def logout_api(request):
+    """API endpoint for user logout"""
+    # For JWT tokens, logout is handled client-side by removing tokens
+    # But we can still clear session if it exists
     auth_logout(request)
     return JsonResponse({
-        'message': 'you have been successfully logged out'
-    }, status=201)
+        'success': True,
+        'message': 'Logout successful. Please remove tokens from client storage.'
+    }, status=200)
+
+
+@csrf_exempt
+@require_http_methods(['POST'])
+def refresh_token_api(request):
+    """API endpoint to refresh access token using refresh token"""
+    try:
+        # Parse request data
+        content_type = request.content_type
+        if content_type == 'application/json':
+            try:
+                data = json.loads(request.body)
+            except json.JSONDecodeError:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Invalid JSON data',
+                    'errors': {'json': ['Request body contains invalid JSON']}
+                }, status=400)
+        else:
+            data = request.POST.dict()
+        
+        refresh_token = data.get('refresh')
+        if not refresh_token:
+            return JsonResponse({
+                'success': False,
+                'message': 'Missing refresh token',
+                'errors': {'refresh': ['Refresh token is required']}
+            }, status=400)
+        
+        # Refresh the token
+        try:
+            new_tokens = refresh_access_token(refresh_token)
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'Token refreshed successfully',
+                'data': {
+                    'access': new_tokens['access']
+                }
+            }, status=200)
+        except Exception as e:
+            return JsonResponse({
+                'success': False,
+                'message': 'Invalid or expired refresh token',
+                'errors': {'refresh': [str(e)]}
+            }, status=401)
+            
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'message': 'Internal server error',
+            'errors': {'server': [str(e)]}
+        }, status=500)
 
 def get_token_user(request):
-    """Helper function to get user from token authentication"""
+    """Helper function to get user from token authentication (JWT or legacy token)"""
     auth_header = request.headers.get('Authorization')
     if not auth_header or not auth_header.startswith('Bearer '):
         return None
     
     token = auth_header.replace('Bearer ', '')
+    
+    # Try JWT token first
+    user = get_user_from_token(token)
+    if user:
+        return user
+    
+    # Fallback to legacy token authentication (for backward compatibility)
     try:
         from rest_framework.authtoken.models import Token
         token_obj = Token.objects.get(key=token)
@@ -556,99 +609,99 @@ def dashboard_api(request):
             'errors': {'server': ['An unexpected error occurred']}
         }, status=500)
 
-@csrf_exempt 
-@require_http_methods(['POST'])
-def bookmark_toggle_api(request, post_id):
-    """API endpoint to toggle bookmark status"""
-    try:
-        # Get user from token
-        user = get_token_user(request)
-        if not user:
-            return JsonResponse({
-                'success': False,
-                'message': 'Authentication required',
-                'errors': {'auth': ['Please provide valid authentication credentials']}
-            }, status=401)
+# @csrf_exempt 
+# @require_http_methods(['POST'])
+# def bookmark_toggle_api(request, post_id):
+#     """API endpoint to toggle bookmark status"""
+#     try:
+#         # Get user from token
+#         user = get_token_user(request)
+#         if not user:
+#             return JsonResponse({
+#                 'success': False,
+#                 'message': 'Authentication required',
+#                 'errors': {'auth': ['Please provide valid authentication credentials']}
+#             }, status=401)
         
-        post = get_object_or_404(Post, id=post_id)
+#         post = get_object_or_404(Post, id=post_id)
         
-        # Check if this post is already bookmarked by the user
-        existing_bookmark = Bookmark.objects.filter(user=user, post=post).first()
+#         # Check if this post is already bookmarked by the user
+#         existing_bookmark = Bookmark.objects.filter(user=user, post=post).first()
         
-        if existing_bookmark:
-            # If bookmark already existed, delete it (toggle off)
-            existing_bookmark.delete()
-            is_bookmarked = False
-            status_text = 'removed'
-        else:
-            # Create a new bookmark
-            Bookmark.objects.create(user=user, post=post)
-            is_bookmarked = True
-            status_text = 'added'
+#         if existing_bookmark:
+#             # If bookmark already existed, delete it (toggle off)
+#             existing_bookmark.delete()
+#             is_bookmarked = False
+#             status_text = 'removed'
+#         else:
+#             # Create a new bookmark
+#             Bookmark.objects.create(user=user, post=post)
+#             is_bookmarked = True
+#             status_text = 'added'
         
-        return JsonResponse({
-            'success': True,
-            'message': f'Bookmark {status_text} successfully',
-            'data': {
-                'is_bookmarked': is_bookmarked,
-                'status': status_text,
-                'post_id': post_id
-            }
-        }, status=200)
+#         return JsonResponse({
+#             'success': True,
+#             'message': f'Bookmark {status_text} successfully',
+#             'data': {
+#                 'is_bookmarked': is_bookmarked,
+#                 'status': status_text,
+#                 'post_id': post_id
+#             }
+#         }, status=200)
         
-    except Exception as e:
-        return JsonResponse({
-            'success': False,
-            'message': 'Error toggling bookmark',
-            'errors': {'server': [str(e)]}
-        }, status=500)
+#     except Exception as e:
+#         return JsonResponse({
+#             'success': False,
+#             'message': 'Error toggling bookmark',
+#             'errors': {'server': [str(e)]}
+#         }, status=500)
 
-@csrf_exempt
-@require_http_methods(['POST'])
-def like_post_api(request, post_id):
-    """API endpoint to toggle like status"""
-    try:
-        # Get user from token
-        user = get_token_user(request)
-        if not user:
-            return JsonResponse({
-                'success': False,
-                'message': 'Authentication required',
-                'errors': {'auth': ['Please provide valid authentication credentials']}
-            }, status=401)
+# @csrf_exempt
+# @require_http_methods(['POST'])
+# def like_post_api(request, post_id):
+#     """API endpoint to toggle like status"""
+#     try:
+#         # Get user from token
+#         user = get_token_user(request)
+#         if not user:
+#             return JsonResponse({
+#                 'success': False,
+#                 'message': 'Authentication required',
+#                 'errors': {'auth': ['Please provide valid authentication credentials']}
+#             }, status=401)
         
-        post = get_object_or_404(Post, id=post_id)
+#         post = get_object_or_404(Post, id=post_id)
         
-        if user in post.likes.all():
-            post.likes.remove(user)
-            liked = False
-            status_text = 'removed'
-        else:
-            post.likes.add(user)
-            liked = True
-            status_text = 'added'
+#         if user in post.likes.all():
+#             post.likes.remove(user)
+#             liked = False
+#             status_text = 'removed'
+#         else:
+#             post.likes.add(user)
+#             liked = True
+#             status_text = 'added'
         
-        return JsonResponse({
-            'success': True,
-            'message': f'Like {status_text} successfully',
-            'data': {
-                'liked': liked,
-                'total_likes': post.total_likes(),
-                'status': status_text,
-                'post_id': post_id
-            }
-        }, status=200)
+#         return JsonResponse({
+#             'success': True,
+#             'message': f'Like {status_text} successfully',
+#             'data': {
+#                 'liked': liked,
+#                 'total_likes': post.total_likes(),
+#                 'status': status_text,
+#                 'post_id': post_id
+#             }
+#         }, status=200)
         
-    except Exception as e:
-        return JsonResponse({
-            'success': False,
-            'message': 'Error toggling like',
-            'errors': {'server': [str(e)]}
-        }, status=500)
+#     except Exception as e:
+#         return JsonResponse({
+#             'success': False,
+#             'message': 'Error toggling like',
+#             'errors': {'server': [str(e)]}
+#         }, status=500)
 
-@csrf_exempt
-@require_http_methods(['GET'])
-def categories_api(request):
+# @csrf_exempt
+# @require_http_methods(['GET'])
+# def categories_api(request):
     """API endpoint to get all available categories"""
     try:
         categories_data = []
@@ -679,6 +732,7 @@ def categories_api(request):
 
 @login_required
 def dashboard(request):
+    """Legacy HTML view - kept for backward compatibility"""
     # Get filter parameters from the request
     search_query = request.GET.get('q', '').strip()
     category = request.GET.get('category', '')
@@ -765,8 +819,8 @@ def dashboard(request):
     
     return render(request, 'authentication/dashboard.html', context)
 
-@login_required
-def post_detail(request, post_id):
+# @login_required
+# def post_detail(request, post_id):
     post = get_object_or_404(Post, id=post_id)
     is_bookmarked = Bookmark.objects.filter(user=request.user, post=post).exists()
     
@@ -804,506 +858,506 @@ def post_detail(request, post_id):
     
     return render(request, 'authentication/post_detail.html', context)
 
-@login_required
-def purchase_product(request, post_id):
-    if request.method == 'POST':
-        product = get_object_or_404(Post, id=post_id)
+# @login_required
+# def purchase_product(request, post_id):
+#     if request.method == 'POST':
+#         product = get_object_or_404(Post, id=post_id)
         
-        # Check if user is trying to buy their own product
-        if product.user == request.user:
-            messages.error(request, "You cannot purchase your own product.")
-            return redirect('post_detail', post_id=post_id)
+#         # Check if user is trying to buy their own product
+#         if product.user == request.user:
+#             messages.error(request, "You cannot purchase your own product.")
+#             return redirect('post_detail', post_id=post_id)
         
-        # Check if price is None or not set
-        if product.price is None:
-            messages.error(request, f'Unable to purchase {product.title}. The product does not have a valid price.')
-            return redirect('post_detail', post_id=post_id)
+#         # Check if price is None or not set
+#         if product.price is None:
+#             messages.error(request, f'Unable to purchase {product.title}. The product does not have a valid price.')
+#             return redirect('post_detail', post_id=post_id)
         
 
-        # Check if product is out of stock
-        if product.inventory <= 0:
-            messages.error(request, f'Sorry, {product.title} is currently out of stock.')
-            return redirect('post_detail', post_id=post_id)
+#         # Check if product is out of stock
+#         if product.inventory <= 0:
+#             messages.error(request, f'Sorry, {product.title} is currently out of stock.')
+#             return redirect('post_detail', post_id=post_id)
         
-        # Get quantity from form
-        try:
-            quantity = int(request.POST.get('quantity', 1))
-            if quantity <= 0:
-                raise ValueError("Quantity must be positive")
-        except (ValueError, TypeError):
-            messages.error(request, "Please enter a valid quantity.")
-            return redirect('post_detail', post_id=post_id)
+#         # Get quantity from form
+#         try:
+#             quantity = int(request.POST.get('quantity', 1))
+#             if quantity <= 0:
+#                 raise ValueError("Quantity must be positive")
+#         except (ValueError, TypeError):
+#             messages.error(request, "Please enter a valid quantity.")
+#             return redirect('post_detail', post_id=post_id)
         
-        # Check if enough inventory (with fresh data to prevent race conditions)
-        product.refresh_from_db()  # Get latest inventory data
-        if product.inventory < quantity:
-            if product.inventory == 0:
-                messages.error(request, f'Sorry, {product.title} is now out of stock.')
-            else:
-                messages.error(request, f'Sorry, there are only {product.inventory} items available.')
-            return redirect('post_detail', post_id=post_id)
+#         # Check if enough inventory (with fresh data to prevent race conditions)
+#         product.refresh_from_db()  # Get latest inventory data
+#         if product.inventory < quantity:
+#             if product.inventory == 0:
+#                 messages.error(request, f'Sorry, {product.title} is now out of stock.')
+#             else:
+#                 messages.error(request, f'Sorry, there are only {product.inventory} items available.')
+#             return redirect('post_detail', post_id=post_id)
         
-        # Get delivery method and details
-        delivery_method = request.POST.get('delivery_method', 'pickup')
-        delivery_address = request.POST.get('delivery_address', '')
-        delivery_latitude = request.POST.get('delivery_latitude')
-        delivery_longitude = request.POST.get('delivery_longitude')
-        payment_method = request.POST.get('payment_method', 'momo')  # New payment method field
+#         # Get delivery method and details
+#         delivery_method = request.POST.get('delivery_method', 'pickup')
+#         delivery_address = request.POST.get('delivery_address', '')
+#         delivery_latitude = request.POST.get('delivery_latitude')
+#         delivery_longitude = request.POST.get('delivery_longitude')
+#         payment_method = request.POST.get('payment_method', 'momo')  # New payment method field
         
-        # Calculate total price
-        total_price = product.price * quantity
-        delivery_fee = Decimal('5.00') if delivery_method == 'delivery' else Decimal('0.00')
+#         # Calculate total price
+#         total_price = product.price * quantity
+#         delivery_fee = Decimal('5.00') if delivery_method == 'delivery' else Decimal('0.00')
         
-        # Validate delivery details if delivery is selected
-        if delivery_method == 'delivery':
-            if not delivery_address:
-                messages.error(request, "Please provide a delivery address for home delivery.")
-                return redirect('post_detail', post_id=post_id)
+#         # Validate delivery details if delivery is selected
+#         if delivery_method == 'delivery':
+#             if not delivery_address:
+#                 messages.error(request, "Please provide a delivery address for home delivery.")
+#                 return redirect('post_detail', post_id=post_id)
         
-        # Determine initial status based on delivery method
-        initial_status = 'awaiting_delivery' if delivery_method == 'delivery' else 'awaiting_pickup'
+#         # Determine initial status based on delivery method
+#         initial_status = 'awaiting_delivery' if delivery_method == 'delivery' else 'awaiting_pickup'
         
-        # Create a new purchase with KoraQuest workflow
-        purchase = Purchase(
-            buyer=request.user,
-            product=product,
-            quantity=quantity,
-            purchase_price=total_price,
-            delivery_method=delivery_method,
-            payment_method=payment_method,
-            delivery_fee=delivery_fee,
-            delivery_address=delivery_address,
-            status=initial_status
-        )
+#         # Create a new purchase with agaseke workflow
+#         purchase = Purchase(
+#             buyer=request.user,
+#             product=product,
+#             quantity=quantity,
+#             purchase_price=total_price,
+#             delivery_method=delivery_method,
+#             payment_method=payment_method,
+#             delivery_fee=delivery_fee,
+#             delivery_address=delivery_address,
+#             status=initial_status
+#         )
         
-        # Add location coordinates if provided
-        if delivery_latitude and delivery_longitude:
-            try:
-                purchase.delivery_latitude = float(delivery_latitude)
-                purchase.delivery_longitude = float(delivery_longitude)
-            except (ValueError, TypeError):
-                pass  # Ignore invalid coordinates
+#         # Add location coordinates if provided
+#         if delivery_latitude and delivery_longitude:
+#             try:
+#                 purchase.delivery_latitude = float(delivery_latitude)
+#                 purchase.delivery_longitude = float(delivery_longitude)
+#             except (ValueError, TypeError):
+#                 pass  # Ignore invalid coordinates
         
-        purchase.save()
+#         purchase.save()
         
-        # Update inventory immediately after successful purchase
-        product.inventory -= quantity
+#         # Update inventory immediately after successful purchase
+#         product.inventory -= quantity
         
-        # Update statistics
-        product.total_purchases += 1
-        product.save()
+#         # Update statistics
+#         product.total_purchases += 1
+#         product.save()
         
-        # Update QR code to include this purchase
-        from .qr_utils import update_user_qr_code
-        update_user_qr_code(request.user)
+#         # Update QR code to include this purchase
+#         from .qr_utils import update_user_qr_code
+#         update_user_qr_code(request.user)
         
-        # Success message based on delivery method
-        if delivery_method == 'delivery':
-            messages.success(request, f'You have successfully purchased {quantity} {product.title}! Total: RWF {total_price + delivery_fee:,.2f} (including RWF {delivery_fee:,.2f} delivery fee). KoraQuest will deliver to your address.')
-        else:
-            messages.success(request, f'You have successfully purchased {quantity} {product.title}! Please go to KoraQuest to collect your items.')
+#         # Success message based on delivery method
+#         if delivery_method == 'delivery':
+#             messages.success(request, f'You have successfully purchased {quantity} {product.title}! Total: RWF {total_price + delivery_fee:,.2f} (including RWF {delivery_fee:,.2f} delivery fee). agaseke will deliver to your address.')
+#         else:
+#             messages.success(request, f'You have successfully purchased {quantity} {product.title}! Please go to agaseke to collect your items.')
         
-        return redirect('purchase_history')
+#         return redirect('purchase_history')
     
-    return redirect('post_detail', post_id=post_id)
+#     return redirect('post_detail', post_id=post_id)
 
-@login_required
-def bookmark_toggle(request, post_id):
-    if request.method == 'POST':
-        try:
-            post = get_object_or_404(Post, id=post_id)
+# @login_required
+# def bookmark_toggle(request, post_id):
+#     if request.method == 'POST':
+#         try:
+#             post = get_object_or_404(Post, id=post_id)
             
-            # Check if this post is already bookmarked by the user
-            existing_bookmark = Bookmark.objects.filter(user=request.user, post=post).first()
+#             # Check if this post is already bookmarked by the user
+#             existing_bookmark = Bookmark.objects.filter(user=request.user, post=post).first()
             
-            if existing_bookmark:
-                # If bookmark already existed, delete it (toggle off)
-                existing_bookmark.delete()
-                is_bookmarked = False
-                status = 'removed'
-            else:
-                # Create a new bookmark
-                Bookmark.objects.create(user=request.user, post=post)
-                is_bookmarked = True
-                status = 'added'
+#             if existing_bookmark:
+#                 # If bookmark already existed, delete it (toggle off)
+#                 existing_bookmark.delete()
+#                 is_bookmarked = False
+#                 status = 'removed'
+#             else:
+#                 # Create a new bookmark
+#                 Bookmark.objects.create(user=request.user, post=post)
+#                 is_bookmarked = True
+#                 status = 'added'
             
-            return JsonResponse({
-                'success': True,
-                'is_bookmarked': is_bookmarked,
-                'status': status,
-                'post_id': post_id
-            })
-        except Exception as e:
-            return JsonResponse({
-                'success': False,
-                'error': str(e)
-            }, status=500)
+#             return JsonResponse({
+#                 'success': True,
+#                 'is_bookmarked': is_bookmarked,
+#                 'status': status,
+#                 'post_id': post_id
+#             })
+#         except Exception as e:
+#             return JsonResponse({
+#                 'success': False,
+#                 'error': str(e)
+#             }, status=500)
     
-    return JsonResponse({'error': 'Invalid request'}, status=400)
+#     return JsonResponse({'error': 'Invalid request'}, status=400)
 
-@login_required
-def purchase_history(request):
-    purchases = Purchase.objects.filter(buyer=request.user).order_by('-created_at')
+# @login_required
+# def purchase_history(request):
+#     purchases = Purchase.objects.filter(buyer=request.user).order_by('-created_at')
     
-    # Check if export is requested
-    export_format = request.GET.get('export')
-    if export_format in ['csv', 'pdf']:
-        # Prepare data for export
-        headers = ['Order ID', 'Product', 'Seller', 'Date', 'Price', 'Status', 'Quantity', 'Delivery Method']
-        data = []
+#     # Check if export is requested
+#     export_format = request.GET.get('export')
+#     if export_format in ['csv', 'pdf']:
+#         # Prepare data for export
+#         headers = ['Order ID', 'Product', 'Seller', 'Date', 'Price', 'Status', 'Quantity', 'Delivery Method']
+#         data = []
         
-        for purchase in purchases:
-            data.append([
-                purchase.order_id,
-                purchase.product.title,
-                f"{purchase.product.user.first_name} {purchase.product.user.last_name}",
-                purchase.created_at.strftime('%Y-%m-%d %H:%M'),
-                f"RWF {purchase.purchase_price:,.1f}",
-                purchase.status.title(),
-                purchase.quantity,
-                purchase.delivery_method.title()
-            ])
+#         for purchase in purchases:
+#             data.append([
+#                 purchase.order_id,
+#                 purchase.product.title,
+#                 f"{purchase.product.user.first_name} {purchase.product.user.last_name}",
+#                 purchase.created_at.strftime('%Y-%m-%d %H:%M'),
+#                 f"RWF {purchase.purchase_price:,.1f}",
+#                 purchase.status.title(),
+#                 purchase.quantity,
+#                 purchase.delivery_method.title()
+#             ])
         
-        # Summary data for PDF
-        summary_data = {
-            'Total Purchases': purchases.count(),
-            'Total Spent': f"RWF {(purchases.aggregate(total=Sum('purchase_price'))['total'] or 0):,.1f}",
-            'Completed Orders': purchases.filter(status='completed').count(),
-            'Pending Orders': purchases.filter(status__in=['pending', 'processing']).count(),
-            'Report Generated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        }
+#         # Summary data for PDF
+#         summary_data = {
+#             'Total Purchases': purchases.count(),
+#             'Total Spent': f"RWF {(purchases.aggregate(total=Sum('purchase_price'))['total'] or 0):,.1f}",
+#             'Completed Orders': purchases.filter(status='completed').count(),
+#             'Pending Orders': purchases.filter(status__in=['pending', 'processing']).count(),
+#             'Report Generated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+#         }
         
-        filename = f"purchase_history_{request.user.username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        title = f"Purchase History Report - {request.user.get_full_name() or request.user.username}"
+#         filename = f"purchase_history_{request.user.username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+#         title = f"Purchase History Report - {request.user.get_full_name() or request.user.username}"
         
-        if export_format == 'csv':
-            return generate_csv_report(data, filename, headers)
-        elif export_format == 'pdf':
-            return generate_pdf_report(data, filename, title, headers, summary_data)
+#         if export_format == 'csv':
+#             return generate_csv_report(data, filename, headers)
+#         elif export_format == 'pdf':
+#             return generate_pdf_report(data, filename, title, headers, summary_data)
     
-    context = {
-        'purchases': purchases
-    }
+#     context = {
+#         'purchases': purchases
+#     }
     
-    return render(request, 'authentication/purchase_history.html', context)
+#     return render(request, 'authentication/purchase_history.html', context)
 
-@login_required
-def bookmarks(request):
-    bookmarks = Bookmark.objects.filter(user=request.user).order_by('-created_at')
+# @login_required
+# def bookmarks(request):
+#     bookmarks = Bookmark.objects.filter(user=request.user).order_by('-created_at')
     
-    context = {
-        'bookmarks': bookmarks
-    }
+#     context = {
+#         'bookmarks': bookmarks
+#     }
     
-    return render(request, 'authentication/bookmarks.html', context)
+#     return render(request, 'authentication/bookmarks.html', context)
 
-@login_required
-def vendor_dashboard(request):
-    # Ensure user is a vendor
-    if not request.user.is_vendor_role:
-        messages.error(request, 'You need to be registered as a vendor to access this dashboard.')
-        return redirect('dashboard')
+# @login_required
+# def vendor_dashboard(request):
+#     # Ensure user is a vendor
+#     if not request.user.is_vendor_role:
+#         messages.error(request, 'You need to be registered as a vendor to access this dashboard.')
+#         return redirect('dashboard')
     
-    # Get vendor's products
-    products = Post.objects.filter(user=request.user)
+#     # Get vendor's products
+#     products = Post.objects.filter(user=request.user)
     
-    # Get purchases for vendor's products
-    purchases = Purchase.objects.filter(product__user=request.user)
+#     # Get purchases for vendor's products
+#     purchases = Purchase.objects.filter(product__user=request.user)
     
-    # Calculate statistics
-    total_sales = purchases.filter(status='completed').count()
-    total_revenue = request.user.total_sales
+#     # Calculate statistics
+#     total_sales = purchases.filter(status='completed').count()
+#     total_revenue = request.user.total_sales
     
-    # Get recent purchases
-    recent_purchases = purchases.order_by('-created_at')[:5]
+#     # Get recent purchases
+#     recent_purchases = purchases.order_by('-created_at')[:5]
     
-    context = {
-        'products': products,
-        'purchases': purchases,
-        'total_sales': total_sales,
-        'total_revenue': total_revenue,
-        'recent_purchases': recent_purchases
-    }
+#     context = {
+#         'products': products,
+#         'purchases': purchases,
+#         'total_sales': total_sales,
+#         'total_revenue': total_revenue,
+#         'recent_purchases': recent_purchases
+#     }
     
-    return render(request, 'authentication/vendor_dashboard.html', context)
+#     return render(request, 'authentication/vendor_dashboard.html', context)
 
-@login_required
-def user_settings(request):
-    # Handle form submissions for profile/account updates and role upgrades
-    if request.method == 'POST':
-        form_type = request.POST.get('form_type')
-        upgrade_type = request.POST.get('upgrade_type')
+# @login_required
+# def user_settings(request):
+#     # Handle form submissions for profile/account updates and role upgrades
+#     if request.method == 'POST':
+#         form_type = request.POST.get('form_type')
+#         upgrade_type = request.POST.get('upgrade_type')
         
-        # Profile picture upload (AJAX request)
-        if form_type == 'profile_picture':
-            if 'profile_picture' in request.FILES:
-                try:
-                    user = request.user
-                    user.profile_picture = request.FILES['profile_picture']
-                    user.save()
+#         # Profile picture upload (AJAX request)
+#         if form_type == 'profile_picture':
+#             if 'profile_picture' in request.FILES:
+#                 try:
+#                     user = request.user
+#                     user.profile_picture = request.FILES['profile_picture']
+#                     user.save()
                     
-                    if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-                        return JsonResponse({'success': True, 'message': 'Profile picture updated successfully!'})
-                    else:
-                        messages.success(request, 'Profile picture updated successfully!')
-                        return redirect('user_settings')
-                except Exception as e:
-                    if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-                        return JsonResponse({'success': False, 'error': f'Failed to update profile picture: {str(e)}'})
-                    else:
-                        messages.error(request, f'Failed to update profile picture: {str(e)}')
-            else:
-                if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-                    return JsonResponse({'success': False, 'error': 'No image file provided'})
-                else:
-                    messages.error(request, 'No image file provided')
+#                     if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+#                         return JsonResponse({'success': True, 'message': 'Profile picture updated successfully!'})
+#                     else:
+#                         messages.success(request, 'Profile picture updated successfully!')
+#                         return redirect('user_settings')
+#                 except Exception as e:
+#                     if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+#                         return JsonResponse({'success': False, 'error': f'Failed to update profile picture: {str(e)}'})
+#                     else:
+#                         messages.error(request, f'Failed to update profile picture: {str(e)}')
+#             else:
+#                 if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+#                     return JsonResponse({'success': False, 'error': 'No image file provided'})
+#                 else:
+#                     messages.error(request, 'No image file provided')
         
-        # Profile form submission
-        elif form_type == 'profile':
-            first_name = request.POST.get('first_name')
-            last_name = request.POST.get('last_name')
-            email = request.POST.get('email')
-            phone_number = request.POST.get('phone_number')
+#         # Profile form submission
+#         elif form_type == 'profile':
+#             first_name = request.POST.get('first_name')
+#             last_name = request.POST.get('last_name')
+#             email = request.POST.get('email')
+#             phone_number = request.POST.get('phone_number')
             
-            # Update user profile
-            request.user.first_name = first_name
-            request.user.last_name = last_name
-            request.user.email = email
-            request.user.phone_number = phone_number
+#             # Update user profile
+#             request.user.first_name = first_name
+#             request.user.last_name = last_name
+#             request.user.email = email
+#             request.user.phone_number = phone_number
             
-            # Handle profile picture upload if included in the form
-            profile_picture = request.FILES.get('profile_picture')
-            if profile_picture:
-                request.user.profile_picture = profile_picture
+#             # Handle profile picture upload if included in the form
+#             profile_picture = request.FILES.get('profile_picture')
+#             if profile_picture:
+#                 request.user.profile_picture = profile_picture
             
-            request.user.save()
-            messages.success(request, 'Profile updated successfully.')
-            return redirect('user_settings')
+#             request.user.save()
+#             messages.success(request, 'Profile updated successfully.')
+#             return redirect('user_settings')
         
-        # Account form submission (password change)
-        elif form_type == 'account':
-            new_password = request.POST.get('new_password')
-            confirm_password = request.POST.get('confirm_password')
+#         # Account form submission (password change)
+#         elif form_type == 'account':
+#             new_password = request.POST.get('new_password')
+#             confirm_password = request.POST.get('confirm_password')
             
-            if new_password and confirm_password:
-                if new_password == confirm_password:
-                    request.user.set_password(new_password)
-                    request.user.save()
-                    messages.success(request, 'Password changed successfully. Please log in again.')
-                    return redirect('login')
-                else:
-                    messages.error(request, 'Passwords do not match.')
-            else:
-                messages.error(request, 'Please fill in both password fields.')
+#             if new_password and confirm_password:
+#                 if new_password == confirm_password:
+#                     request.user.set_password(new_password)
+#                     request.user.save()
+#                     messages.success(request, 'Password changed successfully. Please log in again.')
+#                     return redirect('login')
+#                 else:
+#                     messages.error(request, 'Passwords do not match.')
+#             else:
+#                 messages.error(request, 'Please fill in both password fields.')
         
-        # Role upgrade form submissions
-        elif upgrade_type == 'vendor':
-            # Process vendor upgrade
-            if request.user.is_vendor_role:
-                messages.info(request, 'You are already registered as a vendor.')
-            else:
-                # Enable vendor role without changing other roles
-                request.user.is_vendor_role = True
-                request.user.save()
-                messages.success(request, 'Congratulations! Your account has been upgraded to include Vendor capabilities. You can now create product posts.')
+#         # Role upgrade form submissions
+#         elif upgrade_type == 'vendor':
+#             # Process vendor upgrade
+#             if request.user.is_vendor_role:
+#                 messages.info(request, 'You are already registered as a vendor.')
+#             else:
+#                 # Enable vendor role without changing other roles
+#                 request.user.is_vendor_role = True
+#                 request.user.save()
+#                 messages.success(request, 'Congratulations! Your account has been upgraded to include Vendor capabilities. You can now create product posts.')
     
-    return render(request, 'authentication/settings.html')
+#     return render(request, 'authentication/settings.html')
 
-@login_required
-def create_post(request):
-    # Check if user has vendor permissions
-    if not request.user.is_vendor_role:
-        messages.error(request, 'You need to upgrade your account to Vendor status to create product listings.')
-        return redirect('user_settings')
+# @login_required
+# def create_post(request):
+#     # Check if user has vendor permissions
+#     if not request.user.is_vendor_role:
+#         messages.error(request, 'You need to upgrade your account to Vendor status to create product listings.')
+#         return redirect('user_settings')
     
-    # Direct to product creation since we only have products now
-    return redirect('create_product')
+#     # Direct to product creation since we only have products now
+#     return redirect('create_product')
 
-@login_required
-def create_product(request):
-    # Check if user has vendor role
-    if not request.user.is_vendor_role:
-        messages.error(request, 'You need to upgrade your account to Vendor status to create product listings.')
-        return redirect('user_settings')
+# @login_required
+# def create_product(request):
+#     # Check if user has vendor role
+#     if not request.user.is_vendor_role:
+#         messages.error(request, 'You need to upgrade your account to Vendor status to create product listings.')
+#         return redirect('user_settings')
     
-    if request.method == 'POST':
-        title = request.POST.get('title')
-        description = request.POST.get('description')
-        main_image = request.FILES.get('main_image')
-        price = request.POST.get('price')
-        category = request.POST.get('category')
-        inventory = request.POST.get('inventory', 1)
+#     if request.method == 'POST':
+#         title = request.POST.get('title')
+#         description = request.POST.get('description')
+#         main_image = request.FILES.get('main_image')
+#         price = request.POST.get('price')
+#         category = request.POST.get('category')
+#         inventory = request.POST.get('inventory', 1)
         
-        try:
-            inventory = int(inventory)
-            if inventory < 0:
-                inventory = 1
-        except (ValueError, TypeError):
-            inventory = 1
+#         try:
+#             inventory = int(inventory)
+#             if inventory < 0:
+#                 inventory = 1
+#         except (ValueError, TypeError):
+#             inventory = 1
         
-        if title and description and main_image and price:
-            # Create the main product (no post_type needed since all posts are products now)
-            post = Post(
-                title=title,
-                description=description,
-                image=main_image,
-                user=request.user,
-                price=price,
-                category=category,
-                inventory=inventory
-            )
-            post.save()
+#         if title and description and main_image and price:
+#             # Create the main product (no post_type needed since all posts are products now)
+#             post = Post(
+#                 title=title,
+#                 description=description,
+#                 image=main_image,
+#                 user=request.user,
+#                 price=price,
+#                 category=category,
+#                 inventory=inventory
+#             )
+#             post.save()
             
-            # Process auxiliary images (limit to 5)
-            auxiliary_images = request.FILES.getlist('auxiliary_images')
-            print(f"DEBUG: Found {len(auxiliary_images)} auxiliary images in create_product")
-            max_images = min(len(auxiliary_images), 5)  # Limit to 5 images
+#             # Process auxiliary images (limit to 5)
+#             auxiliary_images = request.FILES.getlist('auxiliary_images')
+#             print(f"DEBUG: Found {len(auxiliary_images)} auxiliary images in create_product")
+#             max_images = min(len(auxiliary_images), 5)  # Limit to 5 images
             
-            for i in range(max_images):
-                print(f"DEBUG: Creating auxiliary image {i+1} of {max_images}")
-                ProductImage.objects.create(
-                    product=post,
-                    image=auxiliary_images[i],
-                    display_order=i
-                )
+#             for i in range(max_images):
+#                 print(f"DEBUG: Creating auxiliary image {i+1} of {max_images}")
+#                 ProductImage.objects.create(
+#                     product=post,
+#                     image=auxiliary_images[i],
+#                     display_order=i
+#                 )
                 
-            messages.success(request, 'Product listing created successfully!')
-            return redirect('dashboard')
-        else:
-            messages.error(request, 'Please fill all required fields')
+#             messages.success(request, 'Product listing created successfully!')
+#             return redirect('dashboard')
+#         else:
+#             messages.error(request, 'Please fill all required fields')
     
-    return render(request, 'authentication/create_product.html')
+#     return render(request, 'authentication/create_product.html')
 
-@login_required
-def like_post(request, post_id):
-    if request.method == 'POST':
-        try:
-            post = get_object_or_404(Post, id=post_id)
+# @login_required
+# def like_post(request, post_id):
+#     if request.method == 'POST':
+#         try:
+#             post = get_object_or_404(Post, id=post_id)
             
-            if request.user in post.likes.all():
-                post.likes.remove(request.user)
-                liked = False
-            else:
-                post.likes.add(request.user)
-                liked = True
+#             if request.user in post.likes.all():
+#                 post.likes.remove(request.user)
+#                 liked = False
+#             else:
+#                 post.likes.add(request.user)
+#                 liked = True
                 
-            return JsonResponse({
-                'liked': liked,
-                'total_likes': post.total_likes()
-            })
-        except Exception as e:
-            return JsonResponse({
-                'error': str(e)
-            }, status=500)
+#             return JsonResponse({
+#                 'liked': liked,
+#                 'total_likes': post.total_likes()
+#             })
+#         except Exception as e:
+#             return JsonResponse({
+#                 'error': str(e)
+#             }, status=500)
     
-    return JsonResponse({'error': 'Invalid request'}, status=400)
+#     return JsonResponse({'error': 'Invalid request'}, status=400)
 
 # Below functions are kept for backward compatibility but redirect to settings page
-@login_required
-def become_vendor(request):
-    if request.method == 'POST':
-        if request.user.is_vendor_role:
-            messages.info(request, 'You are already registered as a vendor.')
-        else:
-            request.user.is_vendor_role = True
-            request.user.save()
-            messages.success(request, 'Congratulations! Your account has been upgraded to Vendor status. You can now create product posts.')
+# @login_required
+# def become_vendor(request):
+#     if request.method == 'POST':
+#         if request.user.is_vendor_role:
+#             messages.info(request, 'You are already registered as a vendor.')
+#         else:
+#             request.user.is_vendor_role = True
+#             request.user.save()
+#             messages.success(request, 'Congratulations! Your account has been upgraded to Vendor status. You can now create product posts.')
     
-    return redirect('user_settings')
+#     return redirect('user_settings')
 
-@login_required
-def edit_product(request, product_id):
-    # Check if user has vendor role
-    if not request.user.is_vendor_role:
-        messages.error(request, 'You need to have Vendor status to edit product listings.')
-        return redirect('dashboard')
+# @login_required
+# def edit_product(request, product_id):
+#     # Check if user has vendor role
+#     if not request.user.is_vendor_role:
+#         messages.error(request, 'You need to have Vendor status to edit product listings.')
+#         return redirect('dashboard')
     
-    # Get the product (ensure it belongs to the user)
-    product = get_object_or_404(Post, id=product_id, user=request.user)
+#     # Get the product (ensure it belongs to the user)
+#     product = get_object_or_404(Post, id=product_id, user=request.user)
     
-    # Business Rule: Check if product has been purchased or bookmarked
-    has_purchases = Purchase.objects.filter(product=product).exists()
-    has_bookmarks = Bookmark.objects.filter(post=product).exists()
+#     # Business Rule: Check if product has been purchased or bookmarked
+#     has_purchases = Purchase.objects.filter(product=product).exists()
+#     has_bookmarks = Bookmark.objects.filter(post=product).exists()
     
-    if has_purchases or has_bookmarks:
-        messages.error(request, 'This product cannot be edited as it has been purchased or bookmarked by customers.')
-        return redirect('vendor_dashboard')
+#     if has_purchases or has_bookmarks:
+#         messages.error(request, 'This product cannot be edited as it has been purchased or bookmarked by customers.')
+#         return redirect('vendor_dashboard')
     
-    # Get existing auxiliary images
-    auxiliary_images = ProductImage.objects.filter(product=product).order_by('display_order')
+#     # Get existing auxiliary images
+#     auxiliary_images = ProductImage.objects.filter(product=product).order_by('display_order')
     
-    if request.method == 'POST':
-        title = request.POST.get('title')
-        description = request.POST.get('description')
-        price = request.POST.get('price')
-        category = request.POST.get('category')
-        inventory = request.POST.get('inventory')
+#     if request.method == 'POST':
+#         title = request.POST.get('title')
+#         description = request.POST.get('description')
+#         price = request.POST.get('price')
+#         category = request.POST.get('category')
+#         inventory = request.POST.get('inventory')
         
-        if title and description and price:
-            # Update product details
-            product.title = title
-            product.description = description
-            product.price = price
-            product.category = category
+#         if title and description and price:
+#             # Update product details
+#             product.title = title
+#             product.description = description
+#             product.price = price
+#             product.category = category
             
-            # Update inventory if provided
-            if inventory:
-                try:
-                    inventory_value = int(inventory)
-                    if inventory_value >= 0:
-                        product.inventory = inventory_value
-                except (ValueError, TypeError):
-                    pass  # Keep existing inventory if invalid value
+#             # Update inventory if provided
+#             if inventory:
+#                 try:
+#                     inventory_value = int(inventory)
+#                     if inventory_value >= 0:
+#                         product.inventory = inventory_value
+#                 except (ValueError, TypeError):
+#                     pass  # Keep existing inventory if invalid value
             
-            # Handle main image update if provided
-            main_image = request.FILES.get('main_image')
-            if main_image:
-                product.image = main_image
+#             # Handle main image update if provided
+#             main_image = request.FILES.get('main_image')
+#             if main_image:
+#                 product.image = main_image
             
-            product.save()
+#             product.save()
             
-            # Handle auxiliary images
-            # Check if any auxiliary images should be deleted
-            images_to_keep = request.POST.getlist('keep_auxiliary_image')
+#             # Handle auxiliary images
+#             # Check if any auxiliary images should be deleted
+#             images_to_keep = request.POST.getlist('keep_auxiliary_image')
             
-            # Delete images not in the keep list
-            for aux_image in auxiliary_images:
-                if str(aux_image.id) not in images_to_keep:
-                    aux_image.delete()
+#             # Delete images not in the keep list
+#             for aux_image in auxiliary_images:
+#                 if str(aux_image.id) not in images_to_keep:
+#                     aux_image.delete()
             
-            # Count remaining images after deletion
-            remaining_images_count = ProductImage.objects.filter(product=product).count()
+#             # Count remaining images after deletion
+#             remaining_images_count = ProductImage.objects.filter(product=product).count()
             
-            # Calculate how many new images we can add
-            max_new_images = 5 - remaining_images_count
+#             # Calculate how many new images we can add
+#             max_new_images = 5 - remaining_images_count
             
-            if max_new_images > 0:
-                # Add new auxiliary images up to the allowed limit
-                new_auxiliary_images = request.FILES.getlist('auxiliary_images')
-                print(f"DEBUG: Found {len(new_auxiliary_images)} new auxiliary images")
-                max_to_add = min(len(new_auxiliary_images), max_new_images)
+#             if max_new_images > 0:
+#                 # Add new auxiliary images up to the allowed limit
+#                 new_auxiliary_images = request.FILES.getlist('auxiliary_images')
+#                 print(f"DEBUG: Found {len(new_auxiliary_images)} new auxiliary images")
+#                 max_to_add = min(len(new_auxiliary_images), max_new_images)
                 
-                for i in range(max_to_add):
-                    print(f"DEBUG: Creating auxiliary image {i+1} of {max_to_add}")
-                    ProductImage.objects.create(
-                        product=product,
-                        image=new_auxiliary_images[i],
-                        display_order=remaining_images_count + i
-                    )
+#                 for i in range(max_to_add):
+#                     print(f"DEBUG: Creating auxiliary image {i+1} of {max_to_add}")
+#                     ProductImage.objects.create(
+#                         product=product,
+#                         image=new_auxiliary_images[i],
+#                         display_order=remaining_images_count + i
+#                     )
             
-            messages.success(request, 'Product updated successfully!')
-            return redirect('vendor_dashboard')
-        else:
-            messages.error(request, 'Please fill all required fields')
+#             messages.success(request, 'Product updated successfully!')
+#             return redirect('vendor_dashboard')
+#         else:
+#             messages.error(request, 'Please fill all required fields')
     
-    context = {
-        'product': product,
-        'auxiliary_images': auxiliary_images
-    }
+#     context = {
+#         'product': product,
+#         'auxiliary_images': auxiliary_images
+#     }
     
-    return render(request, 'authentication/edit_product.html', context)
+#     return render(request, 'authentication/edit_product.html', context)
 
-# KoraQuest Views
+# agaseke Views
 @login_required
 @ensure_csrf_cookie
 def user_qr_code(request):
@@ -1326,10 +1380,10 @@ def user_qr_code(request):
     return render(request, 'authentication/user_qr_code.html', context)
 
 @login_required
-def koraquest_dashboard(request):
-    """Dashboard for KoraQuest users to manage purchases and inventory"""
-    if not request.user.is_koraquest():
-        messages.error(request, 'Access denied. KoraQuest role required.')
+def agaseke_dashboard(request):
+    """Legacy HTML view - kept for backward compatibility"""
+    if not request.user.is_agaseke():
+        messages.error(request, 'Access denied. agaseke role required.')
         return redirect('dashboard')
     
     # Get all purchases awaiting pickup
@@ -1350,18 +1404,18 @@ def koraquest_dashboard(request):
     # Get completed purchases for revenue tracking
     completed_purchases = Purchase.objects.filter(
         status='completed',
-        koraquest_user=request.user
+        agaseke_user=request.user
     ).select_related('buyer', 'product')
     
     # Calculate revenue statistics
     total_commission = completed_purchases.aggregate(
-        total=Sum('koraquest_commission_amount')
+        total=Sum('agaseke_commission_amount')
     )['total'] or 0
     
     monthly_commission = completed_purchases.filter(
         pickup_confirmed_at__month=timezone.now().month,
         pickup_confirmed_at__year=timezone.now().year
-    ).aggregate(total=Sum('koraquest_commission_amount'))['total'] or 0
+    ).aggregate(total=Sum('agaseke_commission_amount'))['total'] or 0
     
     context = {
         'awaiting_purchases': awaiting_purchases,
@@ -1373,14 +1427,102 @@ def koraquest_dashboard(request):
         'total_completed': completed_purchases.count(),
     }
     
-    return render(request, 'authentication/koraquest_dashboard.html', context)
+    return render(request, 'authentication/agaseke_dashboard.html', context)
+
+
+@csrf_exempt
+@require_http_methods(['GET'])
+def agaseke_dashboard_api(request):
+    """API endpoint to get agaseke dashboard data"""
+    try:
+        # Get user from token
+        user = get_token_user(request)
+        if not user:
+            return JsonResponse({
+                'success': False,
+                'message': 'Authentication required',
+                'errors': {'auth': ['Please provide valid authentication credentials']}
+            }, status=401)
+        
+        # Ensure user is agaseke
+        if not user.is_agaseke():
+            return JsonResponse({
+                'success': False,
+                'message': 'agaseke role required',
+                'errors': {'role': ['You need to be an agaseke operator to access this dashboard']}
+            }, status=403)
+        
+        # Get all purchases awaiting pickup
+        awaiting_purchases = Purchase.objects.filter(
+            status='awaiting_pickup'
+        ).select_related('buyer', 'product', 'product__user').order_by('-created_at')
+        
+        # Get all purchases awaiting delivery
+        awaiting_deliveries = Purchase.objects.filter(
+            status='awaiting_delivery'
+        ).select_related('buyer', 'product', 'product__user').order_by('-created_at')
+        
+        # Get orders out for delivery
+        out_for_delivery = Purchase.objects.filter(
+            status='out_for_delivery'
+        ).select_related('buyer', 'product', 'product__user').order_by('-created_at')
+        
+        # Get completed purchases for revenue tracking
+        completed_purchases = Purchase.objects.filter(
+            status='completed',
+            agaseke_user=user
+        ).select_related('buyer', 'product')
+        
+        # Calculate revenue statistics
+        total_commission = completed_purchases.aggregate(
+            total=Sum('agaseke_commission_amount')
+        )['total'] or 0
+        
+        monthly_commission = completed_purchases.filter(
+            pickup_confirmed_at__month=timezone.now().month,
+            pickup_confirmed_at__year=timezone.now().year
+        ).aggregate(total=Sum('agaseke_commission_amount'))['total'] or 0
+        
+        # Serialize purchases
+        from authentication.serializers_helpers import serialize_purchase, serialize_user
+        awaiting_purchases_data = [serialize_purchase(p) for p in awaiting_purchases[:20]]
+        awaiting_deliveries_data = [serialize_purchase(p) for p in awaiting_deliveries[:20]]
+        out_for_delivery_data = [serialize_purchase(p) for p in out_for_delivery[:20]]
+        completed_purchases_data = [serialize_purchase(p) for p in completed_purchases[:20]]
+        
+        return JsonResponse({
+            'success': True,
+            'message': 'agaseke dashboard data retrieved successfully',
+            'data': {
+                'operator': serialize_user(user),
+                'statistics': {
+                    'awaiting_pickup_count': awaiting_purchases.count(),
+                    'awaiting_delivery_count': awaiting_deliveries.count(),
+                    'out_for_delivery_count': out_for_delivery.count(),
+                    'total_completed': completed_purchases.count(),
+                    'total_commission': float(total_commission) if total_commission else 0.0,
+                    'monthly_commission': float(monthly_commission) if monthly_commission else 0.0,
+                },
+                'awaiting_pickup': awaiting_purchases_data,
+                'awaiting_delivery': awaiting_deliveries_data,
+                'out_for_delivery': out_for_delivery_data,
+                'completed_purchases': completed_purchases_data,
+            }
+        }, status=200)
+        
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'message': 'Error retrieving agaseke dashboard',
+            'errors': {'server': [str(e)]}
+        }, status=500)
 
 @login_required
 def scan_qr_code(request):
-    """QR code scanner interface for KoraQuest users"""
+    """QR code scanner interface for agaseke users"""
     try:
-        if not request.user.is_koraquest():
-            messages.error(request, 'Access denied. KoraQuest role required.')
+        if not request.user.is_agaseke():
+            messages.error(request, 'Access denied. agaseke role required.')
             return redirect('dashboard')
         
         # Create context for rendering
@@ -1431,7 +1573,7 @@ def scan_qr_code(request):
                         
                         # Complete the purchase directly (fallback from JS flow)
                         purchase.status = 'completed'
-                        purchase.koraquest_user = request.user
+                        purchase.agaseke_user = request.user
                         purchase.pickup_confirmed_at = timezone.now()
                         purchase.save()
                         
@@ -1445,11 +1587,11 @@ def scan_qr_code(request):
                         buyer.save()
                         
                         # Success message
-                        context['success_message'] = f'Purchase {purchase.order_id} confirmed successfully! Vendor payment: RWF{purchase.vendor_payment_amount}, KoraQuest commission: RWF{purchase.koraquest_commission_amount}'
+                        context['success_message'] = f'Purchase {purchase.order_id} confirmed successfully! Vendor payment: RWF{purchase.vendor_payment_amount}, agaseke commission: RWF{purchase.agaseke_commission_amount}'
                         messages.success(request, context['success_message'])
                         
                         # Redirect to dashboard after successful completion
-                        return redirect('koraquest_dashboard')
+                        return redirect('agaseke_dashboard')
                     except Purchase.DoesNotExist:
                         context['error_message'] = f'Purchase not found with ID: {purchase_id}'
                         messages.error(request, context['error_message'])
@@ -1488,13 +1630,13 @@ def scan_qr_code(request):
         
     except Exception as e:
         messages.error(request, f"System error: {str(e)}")
-        return redirect('koraquest_dashboard')
+        return redirect('agaseke_dashboard')
 
 @login_required
 def confirm_purchase_pickup(request, purchase_id):
     """Confirm purchase pickup and initiate OTP verification"""
-    if not request.user.is_koraquest():
-        messages.error(request, 'Access denied. KoraQuest role required.')
+    if not request.user.is_agaseke():
+        messages.error(request, 'Access denied. agaseke role required.')
         return redirect('dashboard')
     
     purchase = get_object_or_404(Purchase, id=purchase_id, status='awaiting_pickup')
@@ -1534,7 +1676,7 @@ def confirm_purchase_pickup(request, purchase_id):
             
             # Complete the purchase
             purchase.status = 'completed'
-            purchase.koraquest_user = request.user
+            purchase.agaseke_user = request.user
             purchase.pickup_confirmed_at = timezone.now()
             purchase.save()
             
@@ -1556,7 +1698,7 @@ def confirm_purchase_pickup(request, purchase_id):
                 'success': True,
                 'message': 'Purchase confirmed successfully!',
                 'vendor_payment': str(purchase.vendor_payment_amount),
-                'koraquest_commission': str(purchase.koraquest_commission_amount)
+                'agaseke_commission': str(purchase.agaseke_commission_amount)
             })
     
     context = {
@@ -1569,8 +1711,8 @@ def confirm_purchase_pickup(request, purchase_id):
 @login_required
 def confirm_delivery(request, purchase_id):
     """Confirm delivery completion and initiate OTP verification"""
-    if not request.user.is_koraquest():
-        messages.error(request, 'Access denied. KoraQuest role required.')
+    if not request.user.is_agaseke():
+        messages.error(request, 'Access denied. agaseke role required.')
         return redirect('dashboard')
     
     purchase = get_object_or_404(Purchase, id=purchase_id, status__in=['awaiting_delivery', 'out_for_delivery'])
@@ -1620,7 +1762,7 @@ def confirm_delivery(request, purchase_id):
             
             # Complete the delivery
             purchase.status = 'completed'
-            purchase.koraquest_user = request.user
+            purchase.agaseke_user = request.user
             purchase.pickup_confirmed_at = timezone.now()  # Using same field for delivery confirmation time
             purchase.save()
             
@@ -1642,7 +1784,7 @@ def confirm_delivery(request, purchase_id):
                 'success': True,
                 'message': 'Delivery confirmed successfully!',
                 'vendor_payment': str(purchase.vendor_payment_amount),
-                'koraquest_commission': str(purchase.koraquest_commission_amount)
+                'agaseke_commission': str(purchase.agaseke_commission_amount)
             })
     
     context = {
@@ -1675,358 +1817,358 @@ def update_qr_code_ajax(request):
     
     return JsonResponse({'success': False, 'error': 'Invalid request method'})
 
-@login_required
-def koraquest_purchase_history(request):
-    """View purchase history for KoraQuest users"""
-    if not request.user.is_koraquest():
-        messages.error(request, 'Access denied. KoraQuest role required.')
-        return redirect('dashboard')
+# @login_required
+# def agaseke_purchase_history(request):
+#     """View purchase history for agaseke users"""
+#     if not request.user.is_agaseke():
+#         messages.error(request, 'Access denied. agaseke role required.')
+#         return redirect('dashboard')
     
-    purchases = Purchase.objects.filter(
-        koraquest_user=request.user,
-        status='completed'
-    ).select_related('buyer', 'product', 'product__user').order_by('-pickup_confirmed_at')
+#     purchases = Purchase.objects.filter(
+#         agaseke_user=request.user,
+#         status='completed'
+#     ).select_related('buyer', 'product', 'product__user').order_by('-pickup_confirmed_at')
     
-    # Pagination could be added here
-    context = {
-        'purchases': purchases,
-        'total_commission': purchases.aggregate(
-            total=Sum('koraquest_commission_amount')
-        )['total'] or 0
-    }
+#     # Pagination could be added here
+#     context = {
+#         'purchases': purchases,
+#         'total_commission': purchases.aggregate(
+#             total=Sum('agaseke_commission_amount')
+#         )['total'] or 0
+#     }
     
-    return render(request, 'authentication/koraquest_purchase_history.html', context)
+#     return render(request, 'authentication/agaseke_purchase_history.html', context)
 
-@login_required
-def sales_statistics(request):
-    """Sales statistics view showing detailed financial breakdown for vendors and KoraQuest agents"""
+# @login_required
+# def sales_statistics(request):
+#     """Sales statistics view showing detailed financial breakdown for vendors and agaseke agents"""
     
-    # Check if export is requested
-    export_format = request.GET.get('export')
+#     # Check if export is requested
+#     export_format = request.GET.get('export')
     
-    if request.user.is_vendor_role:
-        # Vendor statistics - show their earnings (80% of product price)
-        purchases = Purchase.objects.filter(
-            product__user=request.user,
-            status='completed'
-        ).select_related('product', 'buyer')
+#     if request.user.is_vendor_role:
+#         # Vendor statistics - show their earnings (80% of product price)
+#         purchases = Purchase.objects.filter(
+#             product__user=request.user,
+#             status='completed'
+#         ).select_related('product', 'buyer')
         
-        # Calculate vendor statistics
-        total_sales = purchases.count()
-        total_revenue = purchases.aggregate(
-            total=Sum('vendor_payment_amount')
-        )['total'] or 0
+#         # Calculate vendor statistics
+#         total_sales = purchases.count()
+#         total_revenue = purchases.aggregate(
+#             total=Sum('vendor_payment_amount')
+#         )['total'] or 0
         
-        # Monthly statistics
-        current_month = timezone.now().month
-        current_year = timezone.now().year
-        monthly_purchases = purchases.filter(
-            pickup_confirmed_at__month=current_month,
-            pickup_confirmed_at__year=current_year
-        )
-        monthly_revenue = monthly_purchases.aggregate(
-            total=Sum('vendor_payment_amount')
-        )['total'] or 0
+#         # Monthly statistics
+#         current_month = timezone.now().month
+#         current_year = timezone.now().year
+#         monthly_purchases = purchases.filter(
+#             pickup_confirmed_at__month=current_month,
+#             pickup_confirmed_at__year=current_year
+#         )
+#         monthly_revenue = monthly_purchases.aggregate(
+#             total=Sum('vendor_payment_amount')
+#         )['total'] or 0
         
-        # Product-wise breakdown
-        product_stats = purchases.values('product__title').annotate(
-            total_sales=Count('id'),
-            total_revenue=Sum('vendor_payment_amount'),
-            avg_price=Avg('vendor_payment_amount')
-        ).order_by('-total_revenue')
+#         # Product-wise breakdown
+#         product_stats = purchases.values('product__title').annotate(
+#             total_sales=Count('id'),
+#             total_revenue=Sum('vendor_payment_amount'),
+#             avg_price=Avg('vendor_payment_amount')
+#         ).order_by('-total_revenue')
         
-        # Recent transactions
-        recent_transactions = purchases.order_by('-pickup_confirmed_at')[:10]
+#         # Recent transactions
+#         recent_transactions = purchases.order_by('-pickup_confirmed_at')[:10]
         
-        # Handle export for vendor
-        if export_format in ['csv', 'pdf']:
-            if export_format == 'csv':
-                headers = ['Product', 'Total Sales', 'Total Revenue', 'Average Price']
-                data = []
-                for product in product_stats:
-                    data.append([
-                        product['product__title'],
-                        product['total_sales'],
-                        f"RWF {product['total_revenue']:,.1f}",
-                        f"RWF {product['avg_price']:,.1f}"
-                    ])
-                filename = f"vendor_sales_{request.user.username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                return generate_csv_report(data, filename, headers)
-            elif export_format == 'pdf':
-                headers = ['Product', 'Total Sales', 'Total Revenue', 'Average Price']
-                data = []
-                for product in product_stats:
-                    data.append([
-                        product['product__title'],
-                        product['total_sales'],
-                        f"RWF {product['total_revenue']:,.1f}",
-                        f"RWF {product['avg_price']:,.1f}"
-                    ])
-                summary_data = {
-                    'Total Sales': total_sales,
-                    'Total Revenue': f"RWF {total_revenue:,.1f}",
-                    'Monthly Revenue': f"RWF {monthly_revenue:,.1f}",
-                    'Commission Rate': '80%',
-                    'Report Generated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                }
-                filename = f"vendor_sales_{request.user.username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                title = f"Vendor Sales Report - {request.user.get_full_name() or request.user.username}"
-                return generate_pdf_report(data, filename, title, headers, summary_data)
+#         # Handle export for vendor
+#         if export_format in ['csv', 'pdf']:
+#             if export_format == 'csv':
+#                 headers = ['Product', 'Total Sales', 'Total Revenue', 'Average Price']
+#                 data = []
+#                 for product in product_stats:
+#                     data.append([
+#                         product['product__title'],
+#                         product['total_sales'],
+#                         f"RWF {product['total_revenue']:,.1f}",
+#                         f"RWF {product['avg_price']:,.1f}"
+#                     ])
+#                 filename = f"vendor_sales_{request.user.username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+#                 return generate_csv_report(data, filename, headers)
+#             elif export_format == 'pdf':
+#                 headers = ['Product', 'Total Sales', 'Total Revenue', 'Average Price']
+#                 data = []
+#                 for product in product_stats:
+#                     data.append([
+#                         product['product__title'],
+#                         product['total_sales'],
+#                         f"RWF {product['total_revenue']:,.1f}",
+#                         f"RWF {product['avg_price']:,.1f}"
+#                     ])
+#                 summary_data = {
+#                     'Total Sales': total_sales,
+#                     'Total Revenue': f"RWF {total_revenue:,.1f}",
+#                     'Monthly Revenue': f"RWF {monthly_revenue:,.1f}",
+#                     'Commission Rate': '80%',
+#                     'Report Generated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+#                 }
+#                 filename = f"vendor_sales_{request.user.username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+#                 title = f"Vendor Sales Report - {request.user.get_full_name() or request.user.username}"
+#                 return generate_pdf_report(data, filename, title, headers, summary_data)
         
-        context = {
-            'user_type': 'vendor',
-            'total_sales': total_sales,
-            'total_revenue': total_revenue,
-            'monthly_revenue': monthly_revenue,
-            'monthly_sales': monthly_purchases.count(),
-            'product_stats': product_stats,
-            'recent_transactions': recent_transactions,
-            'commission_rate': 80,  # Vendor gets 80%
-            'koraquest_rate': 20,   # KoraQuest gets 20%
-        }
+#         context = {
+#             'user_type': 'vendor',
+#             'total_sales': total_sales,
+#             'total_revenue': total_revenue,
+#             'monthly_revenue': monthly_revenue,
+#             'monthly_sales': monthly_purchases.count(),
+#             'product_stats': product_stats,
+#             'recent_transactions': recent_transactions,
+#             'commission_rate': 80,  # Vendor gets 80%
+#             'agaseke_rate': 20,   # agaseke gets 20%
+#         }
         
-    elif request.user.is_koraquest():
-        # KoraQuest agent statistics - show their commission (20% of product price + delivery fees)
-        purchases = Purchase.objects.filter(
-            koraquest_user=request.user,
-            status='completed'
-        ).select_related('product', 'buyer', 'product__user')
+#     elif request.user.is_agaseke():
+#         # agaseke agent statistics - show their commission (20% of product price + delivery fees)
+#         purchases = Purchase.objects.filter(
+#             agaseke_user=request.user,
+#             status='completed'
+#         ).select_related('product', 'buyer', 'product__user')
         
-        # Calculate KoraQuest statistics
-        total_transactions = purchases.count()
-        total_commission = purchases.aggregate(
-            total=Sum('koraquest_commission_amount')
-        )['total'] or 0
+#         # Calculate agaseke statistics
+#         total_transactions = purchases.count()
+#         total_commission = purchases.aggregate(
+#             total=Sum('agaseke_commission_amount')
+#         )['total'] or 0
         
-        # Monthly statistics
-        current_month = timezone.now().month
-        current_year = timezone.now().year
-        monthly_purchases = purchases.filter(
-            pickup_confirmed_at__month=current_month,
-            pickup_confirmed_at__year=current_year
-        )
-        monthly_commission = monthly_purchases.aggregate(
-            total=Sum('koraquest_commission_amount')
-        )['total'] or 0
+#         # Monthly statistics
+#         current_month = timezone.now().month
+#         current_year = timezone.now().year
+#         monthly_purchases = purchases.filter(
+#             pickup_confirmed_at__month=current_month,
+#             pickup_confirmed_at__year=current_year
+#         )
+#         monthly_commission = monthly_purchases.aggregate(
+#             total=Sum('agaseke_commission_amount')
+#         )['total'] or 0
         
-        # Breakdown by commission type
-        total_product_price = purchases.aggregate(total=Sum('purchase_price'))['total'] or 0
-        total_delivery_fees = purchases.aggregate(total=Sum('delivery_fee'))['total'] or 0
-        total_commission_amount = purchases.aggregate(total=Sum('koraquest_commission_amount'))['total'] or 0
+#         # Breakdown by commission type
+#         total_product_price = purchases.aggregate(total=Sum('purchase_price'))['total'] or 0
+#         total_delivery_fees = purchases.aggregate(total=Sum('delivery_fee'))['total'] or 0
+#         total_commission_amount = purchases.aggregate(total=Sum('agaseke_commission_amount'))['total'] or 0
         
-        commission_breakdown = {
-            'product_commission': total_product_price * Decimal('0.2'),
-            'delivery_fees': total_delivery_fees,
-            'total_commission': total_commission_amount
-        }
+#         commission_breakdown = {
+#             'product_commission': total_product_price * Decimal('0.2'),
+#             'delivery_fees': total_delivery_fees,
+#             'total_commission': total_commission_amount
+#         }
         
-        # Vendor-wise breakdown - get unique vendors with their stats
-        vendor_stats = []
+#         # Vendor-wise breakdown - get unique vendors with their stats
+#         vendor_stats = []
         
-        # Use values() to get unique vendors with their aggregated stats
-        vendor_aggregates = purchases.values('product__user__id', 'product__user__username').annotate(
-            total_transactions=Count('id'),
-            total_commission=Sum('koraquest_commission_amount'),
-            avg_commission=Avg('koraquest_commission_amount')
-        ).order_by('-total_commission')
+#         # Use values() to get unique vendors with their aggregated stats
+#         vendor_aggregates = purchases.values('product__user__id', 'product__user__username').annotate(
+#             total_transactions=Count('id'),
+#             total_commission=Sum('agaseke_commission_amount'),
+#             avg_commission=Avg('agaseke_commission_amount')
+#         ).order_by('-total_commission')
         
-        for vendor_data in vendor_aggregates:
-            vendor_stats.append({
-                'vendor_id': vendor_data['product__user__id'],
-                'vendor_username': vendor_data['product__user__username'],
-                'total_transactions': vendor_data['total_transactions'],
-                'total_commission': vendor_data['total_commission'] or 0,
-                'avg_commission': vendor_data['avg_commission'] or 0
-            })
+#         for vendor_data in vendor_aggregates:
+#             vendor_stats.append({
+#                 'vendor_id': vendor_data['product__user__id'],
+#                 'vendor_username': vendor_data['product__user__username'],
+#                 'total_transactions': vendor_data['total_transactions'],
+#                 'total_commission': vendor_data['total_commission'] or 0,
+#                 'avg_commission': vendor_data['avg_commission'] or 0
+#             })
         
 
         
-        # Recent transactions
-        recent_transactions = purchases.order_by('-pickup_confirmed_at')[:10]
+#         # Recent transactions
+#         recent_transactions = purchases.order_by('-pickup_confirmed_at')[:10]
         
-        # Handle export for KoraQuest
-        if export_format in ['csv', 'pdf']:
-            if export_format == 'csv':
-                headers = ['Vendor', 'Transactions', 'Total Commission', 'Average Commission']
-                data = []
-                for vendor in vendor_stats:
-                    data.append([
-                        vendor['vendor_username'],
-                        vendor['total_transactions'],
-                        f"RWF {vendor['total_commission']:,.1f}",
-                        f"RWF {vendor['avg_commission']:,.1f}"
-                    ])
-                filename = f"koraquest_commission_{request.user.username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                return generate_csv_report(data, filename, headers)
-            elif export_format == 'pdf':
-                headers = ['Vendor', 'Transactions', 'Total Commission', 'Average Commission']
-                data = []
-                for vendor in vendor_stats:
-                    data.append([
-                        vendor['vendor_username'],
-                        vendor['total_transactions'],
-                        f"RWF {vendor['total_commission']:,.1f}",
-                        f"RWF {vendor['avg_commission']:,.1f}"
-                    ])
-                summary_data = {
-                    'Total Transactions': total_transactions,
-                    'Total Commission': f"RWF {total_commission:,.1f}",
-                    'Monthly Commission': f"RWF {monthly_commission:,.1f}",
-                    'Commission Rate': '20% + Delivery Fees',
-                    'Report Generated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                }
-                filename = f"koraquest_commission_{request.user.username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                title = f"KoraQuest Commission Report - {request.user.get_full_name() or request.user.username}"
-                return generate_pdf_report(data, filename, title, headers, summary_data)
+#         # Handle export for agaseke
+#         if export_format in ['csv', 'pdf']:
+#             if export_format == 'csv':
+#                 headers = ['Vendor', 'Transactions', 'Total Commission', 'Average Commission']
+#                 data = []
+#                 for vendor in vendor_stats:
+#                     data.append([
+#                         vendor['vendor_username'],
+#                         vendor['total_transactions'],
+#                         f"RWF {vendor['total_commission']:,.1f}",
+#                         f"RWF {vendor['avg_commission']:,.1f}"
+#                     ])
+#                 filename = f"agaseke_commission_{request.user.username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+#                 return generate_csv_report(data, filename, headers)
+#             elif export_format == 'pdf':
+#                 headers = ['Vendor', 'Transactions', 'Total Commission', 'Average Commission']
+#                 data = []
+#                 for vendor in vendor_stats:
+#                     data.append([
+#                         vendor['vendor_username'],
+#                         vendor['total_transactions'],
+#                         f"RWF {vendor['total_commission']:,.1f}",
+#                         f"RWF {vendor['avg_commission']:,.1f}"
+#                     ])
+#                 summary_data = {
+#                     'Total Transactions': total_transactions,
+#                     'Total Commission': f"RWF {total_commission:,.1f}",
+#                     'Monthly Commission': f"RWF {monthly_commission:,.1f}",
+#                     'Commission Rate': '20% + Delivery Fees',
+#                     'Report Generated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+#                 }
+#                 filename = f"agaseke_commission_{request.user.username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+#                 title = f"agaseke Commission Report - {request.user.get_full_name() or request.user.username}"
+#                 return generate_pdf_report(data, filename, title, headers, summary_data)
         
-        context = {
-            'user_type': 'koraquest',
-            'total_transactions': total_transactions,
-            'total_commission': total_commission,
-            'monthly_commission': monthly_commission,
-            'monthly_transactions': monthly_purchases.count(),
-            'commission_breakdown': commission_breakdown,
-            'vendor_stats': vendor_stats,
-            'recent_transactions': recent_transactions,
-            'commission_rate': 20,  # KoraQuest gets 20%
-            'vendor_rate': 80,      # Vendor gets 80%
-        }
+#         context = {
+#             'user_type': 'agaseke',
+#             'total_transactions': total_transactions,
+#             'total_commission': total_commission,
+#             'monthly_commission': monthly_commission,
+#             'monthly_transactions': monthly_purchases.count(),
+#             'commission_breakdown': commission_breakdown,
+#             'vendor_stats': vendor_stats,
+#             'recent_transactions': recent_transactions,
+#             'commission_rate': 20,  # agaseke gets 20%
+#             'vendor_rate': 80,      # Vendor gets 80%
+#         }
         
-    else:
-        # Regular user - show their purchase history
-        purchases = Purchase.objects.filter(
-            buyer=request.user,
-            status='completed'
-        ).select_related('product', 'product__user')
+#     else:
+#         # Regular user - show their purchase history
+#         purchases = Purchase.objects.filter(
+#             buyer=request.user,
+#             status='completed'
+#         ).select_related('product', 'product__user')
         
-        total_spent = purchases.aggregate(
-            total=Sum('purchase_price')
-        )['total'] or 0
+#         total_spent = purchases.aggregate(
+#             total=Sum('purchase_price')
+#         )['total'] or 0
         
-        monthly_purchases = purchases.filter(
-            created_at__month=timezone.now().month,
-            created_at__year=timezone.now().year
-        )
-        monthly_spent = monthly_purchases.aggregate(
-            total=Sum('purchase_price')
-        )['total'] or 0
+#         monthly_purchases = purchases.filter(
+#             created_at__month=timezone.now().month,
+#             created_at__year=timezone.now().year
+#         )
+#         monthly_spent = monthly_purchases.aggregate(
+#             total=Sum('purchase_price')
+#         )['total'] or 0
         
-        # Handle export for customer
-        if export_format in ['csv', 'pdf']:
-            headers = ['Product', 'Seller', 'Date', 'Price', 'Status']
-            data = []
-            for purchase in purchases:
-                data.append([
-                    purchase.product.title,
-                    f"{purchase.product.user.first_name} {purchase.product.user.last_name}",
-                    purchase.created_at.strftime('%Y-%m-%d %H:%M'),
-                    f"RWF {purchase.purchase_price:,.1f}",
-                    purchase.status.title()
-                ])
+#         # Handle export for customer
+#         if export_format in ['csv', 'pdf']:
+#             headers = ['Product', 'Seller', 'Date', 'Price', 'Status']
+#             data = []
+#             for purchase in purchases:
+#                 data.append([
+#                     purchase.product.title,
+#                     f"{purchase.product.user.first_name} {purchase.product.user.last_name}",
+#                     purchase.created_at.strftime('%Y-%m-%d %H:%M'),
+#                     f"RWF {purchase.purchase_price:,.1f}",
+#                     purchase.status.title()
+#                 ])
             
-            if export_format == 'csv':
-                filename = f"customer_purchases_{request.user.username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                return generate_csv_report(data, filename, headers)
-            elif export_format == 'pdf':
-                summary_data = {
-                    'Total Purchases': purchases.count(),
-                    'Total Spent': f"RWF {total_spent:,.1f}",
-                    'Monthly Spent': f"RWF {monthly_spent:,.1f}",
-                    'Report Generated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                }
-                filename = f"customer_purchases_{request.user.username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                title = f"Customer Purchase Report - {request.user.get_full_name() or request.user.username}"
-                return generate_pdf_report(data, filename, title, headers, summary_data)
+#             if export_format == 'csv':
+#                 filename = f"customer_purchases_{request.user.username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+#                 return generate_csv_report(data, filename, headers)
+#             elif export_format == 'pdf':
+#                 summary_data = {
+#                     'Total Purchases': purchases.count(),
+#                     'Total Spent': f"RWF {total_spent:,.1f}",
+#                     'Monthly Spent': f"RWF {monthly_spent:,.1f}",
+#                     'Report Generated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+#                 }
+#                 filename = f"customer_purchases_{request.user.username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+#                 title = f"Customer Purchase Report - {request.user.get_full_name() or request.user.username}"
+#                 return generate_pdf_report(data, filename, title, headers, summary_data)
         
-        context = {
-            'user_type': 'customer',
-            'total_purchases': purchases.count(),
-            'total_spent': total_spent,
-            'monthly_spent': monthly_spent,
-            'monthly_purchases': monthly_purchases.count(),
-            'recent_transactions': purchases.order_by('-created_at')[:10],
-        }
+#         context = {
+#             'user_type': 'customer',
+#             'total_purchases': purchases.count(),
+#             'total_spent': total_spent,
+#             'monthly_spent': monthly_spent,
+#             'monthly_purchases': monthly_purchases.count(),
+#             'recent_transactions': purchases.order_by('-created_at')[:10],
+#         }
     
-    return render(request, 'authentication/sales_statistics.html', context)
+#     return render(request, 'authentication/sales_statistics.html', context)
 
-@login_required
-def vendor_statistics_for_koraquest(request, vendor_id):
-    """KoraQuest users can view detailed statistics for a specific vendor"""
-    if not request.user.is_koraquest():
-        messages.error(request, 'Access denied. KoraQuest role required.')
-        return redirect('dashboard')
+# @login_required
+# def vendor_statistics_for_agaseke(request, vendor_id):
+#     """agaseke users can view detailed statistics for a specific vendor"""
+#     if not request.user.is_agaseke():
+#         messages.error(request, 'Access denied. agaseke role required.')
+#         return redirect('dashboard')
     
-    # Get the vendor
-    vendor = get_object_or_404(User, id=vendor_id, is_vendor_role=True)
+#     # Get the vendor
+#     vendor = get_object_or_404(User, id=vendor_id, is_vendor_role=True)
     
-    # Get all purchases for this vendor
-    purchases = Purchase.objects.filter(
-        product__user=vendor,
-        status='completed'
-    ).select_related('product', 'buyer', 'koraquest_user')
+#     # Get all purchases for this vendor
+#     purchases = Purchase.objects.filter(
+#         product__user=vendor,
+#         status='completed'
+#     ).select_related('product', 'buyer', 'agaseke_user')
     
-    # Calculate vendor statistics (as if KoraQuest is viewing the vendor's dashboard)
-    total_sales = purchases.count()
-    total_revenue = purchases.aggregate(
-        total=Sum('vendor_payment_amount')
-    )['total'] or 0
+#     # Calculate vendor statistics (as if agaseke is viewing the vendor's dashboard)
+#     total_sales = purchases.count()
+#     total_revenue = purchases.aggregate(
+#         total=Sum('vendor_payment_amount')
+#     )['total'] or 0
     
-    # Monthly statistics
-    current_month = timezone.now().month
-    current_year = timezone.now().year
-    monthly_purchases = purchases.filter(
-        pickup_confirmed_at__month=current_month,
-        pickup_confirmed_at__year=current_year
-    )
-    monthly_revenue = monthly_purchases.aggregate(
-        total=Sum('vendor_payment_amount')
-    )['total'] or 0
+#     # Monthly statistics
+#     current_month = timezone.now().month
+#     current_year = timezone.now().year
+#     monthly_purchases = purchases.filter(
+#         pickup_confirmed_at__month=current_month,
+#         pickup_confirmed_at__year=current_year
+#     )
+#     monthly_revenue = monthly_purchases.aggregate(
+#         total=Sum('vendor_payment_amount')
+#     )['total'] or 0
     
-    # Product-wise breakdown
-    product_stats = purchases.values('product__title').annotate(
-        total_sales=Count('id'),
-        total_revenue=Sum('vendor_payment_amount'),
-        avg_price=Avg('vendor_payment_amount')
-    ).order_by('-total_revenue')
+#     # Product-wise breakdown
+#     product_stats = purchases.values('product__title').annotate(
+#         total_sales=Count('id'),
+#         total_revenue=Sum('vendor_payment_amount'),
+#         avg_price=Avg('vendor_payment_amount')
+#     ).order_by('-total_revenue')
     
-    # KoraQuest commission from this vendor
-    koraquest_commission = purchases.aggregate(
-        total=Sum('koraquest_commission_amount')
-    )['total'] or 0
+#     # agaseke commission from this vendor
+#     agaseke_commission = purchases.aggregate(
+#         total=Sum('agaseke_commission_amount')
+#     )['total'] or 0
     
-    # Monthly KoraQuest commission
-    monthly_koraquest_commission = monthly_purchases.aggregate(
-        total=Sum('koraquest_commission_amount')
-    )['total'] or 0
+#     # Monthly agaseke commission
+#     monthly_agaseke_commission = monthly_purchases.aggregate(
+#         total=Sum('agaseke_commission_amount')
+#     )['total'] or 0
     
-    # Recent transactions
-    recent_transactions = purchases.order_by('-pickup_confirmed_at')[:10]
+#     # Recent transactions
+#     recent_transactions = purchases.order_by('-pickup_confirmed_at')[:10]
     
-    # Commission breakdown
-    total_product_price = purchases.aggregate(total=Sum('purchase_price'))['total'] or 0
-    total_delivery_fees = purchases.aggregate(total=Sum('delivery_fee'))['total'] or 0
+#     # Commission breakdown
+#     total_product_price = purchases.aggregate(total=Sum('purchase_price'))['total'] or 0
+#     total_delivery_fees = purchases.aggregate(total=Sum('delivery_fee'))['total'] or 0
     
-    commission_breakdown = {
-        'vendor_earnings': total_revenue,
-        'koraquest_commission': koraquest_commission,
-        'product_commission': total_product_price * Decimal('0.2'),
-        'delivery_fees': total_delivery_fees,
-        'total_transaction_value': total_product_price + total_delivery_fees
-    }
+#     commission_breakdown = {
+#         'vendor_earnings': total_revenue,
+#         'agaseke_commission': agaseke_commission,
+#         'product_commission': total_product_price * Decimal('0.2'),
+#         'delivery_fees': total_delivery_fees,
+#         'total_transaction_value': total_product_price + total_delivery_fees
+#     }
     
-    context = {
-        'vendor': vendor,
-        'total_sales': total_sales,
-        'total_revenue': total_revenue,
-        'monthly_revenue': monthly_revenue,
-        'monthly_sales': monthly_purchases.count(),
-        'product_stats': product_stats,
-        'recent_transactions': recent_transactions,
-        'koraquest_commission': koraquest_commission,
-        'monthly_koraquest_commission': monthly_koraquest_commission,
-        'commission_breakdown': commission_breakdown,
-        'commission_rate': 80,  # Vendor gets 80%
-        'koraquest_rate': 20,   # KoraQuest gets 20%
-    }
+#     context = {
+#         'vendor': vendor,
+#         'total_sales': total_sales,
+#         'total_revenue': total_revenue,
+#         'monthly_revenue': monthly_revenue,
+#         'monthly_sales': monthly_purchases.count(),
+#         'product_stats': product_stats,
+#         'recent_transactions': recent_transactions,
+#         'agaseke_commission': agaseke_commission,
+#         'monthly_agaseke_commission': monthly_agaseke_commission,
+#         'commission_breakdown': commission_breakdown,
+#         'commission_rate': 80,  # Vendor gets 80%
+#         'agaseke_rate': 20,   # agaseke gets 20%
+#     }
     
-    return render(request, 'authentication/vendor_statistics_for_koraquest.html', context)
+#     return render(request, 'authentication/vendor_statistics_for_agaseke.html', context)

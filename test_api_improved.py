@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Improved KoraQuest API Test Script
+Improved agaseke API Test Script
 
-This script demonstrates how to use the KoraQuest REST API endpoints
+This script demonstrates how to use the agaseke REST API endpoints
 with proper CSRF token handling and file uploads.
 """
 
@@ -10,7 +10,7 @@ import requests
 import json
 from typing import Dict, Any
 
-class KoraQuestAPIClient:
+class agasekeAPIClient:
     def __init__(self, base_url: str = "http://localhost:8000"):
         self.base_url = base_url
         self.session = requests.Session()
@@ -132,9 +132,9 @@ class KoraQuestAPIClient:
 
 def main():
     """Demonstrate API usage"""
-    client = KoraQuestAPIClient()
+    client = agasekeAPIClient()
     
-    print("🚀 KoraQuest API Test Script (Improved)")
+    print("🚀 agaseke API Test Script (Improved)")
     print("=" * 50)
     
     # Get CSRF token first
@@ -217,7 +217,7 @@ def main():
         print(f"❌ Logout Error: {e}")
     
     print("\n🎉 API Test Complete!")
-    print("\n✅ Your KoraQuest API is working correctly!")
+    print("\n✅ Your agaseke API is working correctly!")
     print("\nNext steps:")
     print("1. Access the browsable API: http://localhost:8000/auth/api/rest/")
     print("2. Access the admin panel: http://localhost:8000/admin/")

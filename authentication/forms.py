@@ -1,6 +1,7 @@
 from django import forms
 from django.contrib.auth.forms import UserCreationForm
-from .models import User, ProductReview
+from users.models import User
+from posts.models import ProductReview
 
 class SignUpForm(UserCreationForm):
     email = forms.EmailField(required=True)

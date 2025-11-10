@@ -1,46 +1,49 @@
 from django.urls import path, include
-from . import views
+from . import views  # authentication views (QR, agaseke specific)
 from . import api_views
 from django.contrib.auth import views as auth_views
+from users import views as users_views
+from posts import views as posts_views
+from products import views as products_views
 
 urlpatterns = [
-    path('register/', views.register, name='register'),
-    path('login/', views.login_view, name='login'),
-    path('logout/', views.logout_view, name='logout'),
-    path('dashboard/', views.dashboard, name='dashboard'),
-    path('settings/', views.user_settings, name='user_settings'),
+    path('register/', views.register, name='register'),  # Still in authentication
+    path('login/', views.login_view, name='login'),  # Still in authentication
+    path('logout/', views.logout_view, name='logout'),  # Still in authentication
+    path('dashboard/', views.dashboard, name='dashboard'),  # Keep in authentication for now
+    path('settings/', users_views.user_settings, name='user_settings'),
     
-    # Post creation and interaction
-    path('create-post/', views.create_post, name='create_post'),
-    path('create-product/', views.create_product, name='create_product'),
-    path('edit-product/<int:product_id>/', views.edit_product, name='edit_product'),
-    path('like-post/<int:post_id>/', views.like_post, name='like_post'),
+    # Post creation and interaction (HTML views - legacy)
+    path('create-post/', posts_views.create_post, name='create_post'),
+    path('create-product/', products_views.create_product, name='create_product'),
+    path('edit-product/<int:product_id>/', products_views.edit_product, name='edit_product'),
+    path('like-post/<int:post_id>/', posts_views.like_post, name='like_post'),
     
-    # Post detail and actions
-    path('post/<int:post_id>/', views.post_detail, name='post_detail'),
-    path('post/<int:post_id>/purchase/', views.purchase_product, name='purchase_product'),
-    path('bookmark/<int:post_id>/', views.bookmark_toggle, name='bookmark_toggle'),
+    # Post detail and actions (HTML views - legacy)
+    path('post/<int:post_id>/', posts_views.post_detail, name='post_detail'),
+    path('post/<int:post_id>/purchase/', products_views.purchase_product, name='purchase_product'),
+    path('bookmark/<int:post_id>/', posts_views.bookmark_toggle, name='bookmark_toggle'),
     
-    # User dashboards
-    path('vendor-dashboard/', views.vendor_dashboard, name='vendor_dashboard'),
+    # User dashboards (HTML views - legacy)
+    path('vendor-dashboard/', users_views.vendor_dashboard, name='vendor_dashboard'),
     
-    # User history and saved items
-    path('purchases/', views.purchase_history, name='purchase_history'),
-    path('bookmarks/', views.bookmarks, name='bookmarks'),
+    # User history and saved items (HTML views - legacy)
+    path('purchases/', users_views.purchase_history, name='purchase_history'),
+    path('bookmarks/', posts_views.bookmarks, name='bookmarks'),
     
     # Legacy paths (kept for compatibility)
-    path('become-vendor/', views.become_vendor, name='become_vendor'),
+    path('become-vendor/', users_views.become_vendor, name='become_vendor'),
     
-    # KoraQuest specific URLs
+    # agaseke specific URLs
     path('qr-code/', views.user_qr_code, name='user_qr_code'),
-    path('koraquest-dashboard/', views.koraquest_dashboard, name='koraquest_dashboard'),
+    path('agaseke-dashboard/', views.agaseke_dashboard, name='agaseke_dashboard'),
     path('scan-qr/', views.scan_qr_code, name='scan_qr_code'),
     path('confirm-pickup/<int:purchase_id>/', views.confirm_purchase_pickup, name='confirm_purchase_pickup'),
     path('confirm-delivery/<int:purchase_id>/', views.confirm_delivery, name='confirm_delivery'),
     path('update-qr-ajax/', views.update_qr_code_ajax, name='update_qr_code_ajax'),
-    path('koraquest-history/', views.koraquest_purchase_history, name='koraquest_purchase_history'),
-    path('sales-statistics/', views.sales_statistics, name='sales_statistics'),
-    path('vendor-statistics/<int:vendor_id>/', views.vendor_statistics_for_koraquest, name='vendor_statistics_for_koraquest'),
+    path('agaseke-history/', users_views.agaseke_purchase_history, name='agaseke_purchase_history'),
+    path('sales-statistics/', users_views.sales_statistics, name='sales_statistics'),
+    path('vendor-statistics/<int:vendor_id>/', users_views.vendor_statistics_for_agaseke, name='vendor_statistics_for_agaseke'),
     
     # API endpoints for QR code scanning and verification flow
     path('api/purchases/by-qr/', api_views.get_purchases_by_qr, name='api_get_purchases_by_qr'),
@@ -49,20 +52,36 @@ urlpatterns = [
     path('api/verify-otp/', api_views.verify_otp_view, name='api_verify_otp'),
     path('api/complete-purchase/', api_views.complete_purchase_pickup, name='api_complete_purchase'),
     path('api/vendor-statistics/<int:vendor_id>/', api_views.get_vendor_statistics_modal, name='api_vendor_statistics_modal'),
-    
-    # REST API endpoints
-    path('api/rest/', include('authentication.api_urls')),
 ]
 
-# API endpoints
+# API endpoints (v1 - JSON APIs)
 api_endpoints = [
+    # Authentication
     path('v1/register/', views.register_api, name='register_api'),
     path('v1/login/', views.login_api, name='login_api'),
     path('v1/logout/', views.logout_api, name='logout_api'),
+    path('v1/token/refresh/', views.refresh_token_api, name='refresh_token_api'),
+    
+    # Dashboard & Products
     path('v1/dashboard/', views.dashboard_api, name='dashboard_api'),
-    path('v1/bookmark/<int:post_id>/', views.bookmark_toggle_api, name='bookmark_toggle_api'),
-    path('v1/like/<int:post_id>/', views.like_post_api, name='like_post_api'),
-    path('v1/categories/', views.categories_api, name='categories_api'),
+    path('v1/posts/<int:post_id>/', posts_views.post_detail_api, name='post_detail_api'),
+    path('v1/posts/', products_views.create_product_api, name='create_product_api'),  # POST to create product
+    path('v1/posts/<int:post_id>/purchase/', products_views.purchase_product_api, name='purchase_product_api'),
+    
+    # User interactions
+    path('v1/bookmark/<int:post_id>/', posts_views.bookmark_toggle_api, name='bookmark_toggle_api'),
+    path('v1/bookmarks/', posts_views.bookmarks_api, name='bookmarks_api'),
+    path('v1/like/<int:post_id>/', posts_views.like_post_api, name='like_post_api'),
+    
+    # User data
+    path('v1/purchases/', users_views.purchase_history_api, name='purchase_history_api'),
+    path('v1/settings/', users_views.user_settings_api, name='user_settings_api'),
+    path('v1/become-vendor/', users_views.become_vendor_api, name='become_vendor_api'),
+    path('v1/vendor-dashboard/', users_views.vendor_dashboard_api, name='vendor_dashboard_api'),
+    path('v1/agaseke-dashboard/', views.agaseke_dashboard_api, name='agaseke_dashboard_api'),
+    
+    # Categories
+    path('v1/categories/', products_views.categories_api, name='categories_api'),
 ]
 
 # Add api_endpoints to main urlpatterns

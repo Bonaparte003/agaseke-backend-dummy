@@ -4,7 +4,8 @@ from django.views.decorators.http import require_POST
 from django.contrib.auth import authenticate
 from django.contrib.auth.decorators import login_required
 from django.utils import timezone
-from .models import Purchase, User
+from users.models import User
+from products.models import Purchase
 from .qr_utils import decode_qr_data, get_user_purchases_from_qr
 from .otp_utils import create_otp, verify_otp as verify_otp_util
 import json
@@ -15,8 +16,8 @@ from decimal import Decimal
 @require_POST
 def get_purchases_by_qr(request):
     """API endpoint to get purchases from a QR code"""
-    if not request.user.is_koraquest():
-        return JsonResponse({'error': 'Access denied. KoraQuest role required.', 'purchases': []}, status=403)
+    if not request.user.is_agaseke():
+        return JsonResponse({'error': 'Access denied. agaseke role required.', 'purchases': []}, status=403)
     
     try:
         data = json.loads(request.body)
@@ -82,8 +83,8 @@ def get_purchases_by_qr(request):
 @require_POST
 def verify_buyer_credentials(request):
     """API endpoint to verify buyer credentials"""
-    if not request.user.is_koraquest():
-        return JsonResponse({'error': 'Access denied. KoraQuest role required.'}, status=403)
+    if not request.user.is_agaseke():
+        return JsonResponse({'error': 'Access denied. agaseke role required.'}, status=403)
     
     try:
         data = json.loads(request.body)
@@ -119,8 +120,8 @@ def verify_buyer_credentials(request):
 @require_POST
 def send_otp(request):
     """API endpoint to send OTP for purchase verification"""
-    if not request.user.is_koraquest():
-        return JsonResponse({'error': 'Access denied. KoraQuest role required.'}, status=403)
+    if not request.user.is_agaseke():
+        return JsonResponse({'error': 'Access denied. agaseke role required.'}, status=403)
     
     try:
         data = json.loads(request.body)
@@ -154,8 +155,8 @@ def send_otp(request):
 @require_POST
 def verify_otp_view(request):
     """API endpoint to verify OTP for purchase confirmation"""
-    if not request.user.is_koraquest():
-        return JsonResponse({'error': 'Access denied. KoraQuest role required.'}, status=403)
+    if not request.user.is_agaseke():
+        return JsonResponse({'error': 'Access denied. agaseke role required.'}, status=403)
     
     try:
         data = json.loads(request.body)
@@ -189,8 +190,8 @@ def verify_otp_view(request):
 @require_POST
 def complete_purchase_pickup(request):
     """API endpoint to complete purchase pickup after OTP verification"""
-    if not request.user.is_koraquest():
-        return JsonResponse({'error': 'Access denied. KoraQuest role required.'}, status=403)
+    if not request.user.is_agaseke():
+        return JsonResponse({'error': 'Access denied. agaseke role required.'}, status=403)
     
     try:
         data = json.loads(request.body)
@@ -219,7 +220,7 @@ def complete_purchase_pickup(request):
         
         # Complete the purchase
         purchase.status = 'completed'
-        purchase.koraquest_user = request.user
+        purchase.agaseke_user = request.user
         purchase.pickup_confirmed_at = timezone.now()
         purchase.save()
         
@@ -244,7 +245,7 @@ def complete_purchase_pickup(request):
             'success': True,
             'message': 'Purchase confirmed successfully!',
             'vendor_payment': str(purchase.vendor_payment_amount),
-            'koraquest_commission': str(purchase.koraquest_commission_amount)
+            'agaseke_commission': str(purchase.agaseke_commission_amount)
         })
     except Exception as e:
         return JsonResponse({'error': f'Error processing request: {str(e)}'}, status=500)
@@ -255,7 +256,7 @@ def get_vendor_statistics_modal(request, vendor_id):
     if request.method != 'GET':
         return JsonResponse({'error': 'Method not allowed'}, status=405)
     
-    if not request.user.is_authenticated or not request.user.is_koraquest():
+    if not request.user.is_authenticated or not request.user.is_agaseke():
         return JsonResponse({'error': 'Access denied'}, status=403)
     
     try:
@@ -266,7 +267,7 @@ def get_vendor_statistics_modal(request, vendor_id):
         purchases = Purchase.objects.filter(
             product__user=vendor,
             status='completed'
-        ).select_related('product', 'buyer', 'koraquest_user')
+        ).select_related('product', 'buyer', 'agaseke_user')
         
         # Calculate vendor statistics
         total_sales = purchases.count()
@@ -292,14 +293,14 @@ def get_vendor_statistics_modal(request, vendor_id):
             avg_price=Avg('vendor_payment_amount')
         ).order_by('-total_revenue')[:5])  # Limit to top 5 products
         
-        # KoraQuest commission from this vendor
-        koraquest_commission = purchases.aggregate(
-            total=Sum('koraquest_commission_amount')
+        # agaseke commission from this vendor
+        agaseke_commission = purchases.aggregate(
+            total=Sum('agaseke_commission_amount')
         )['total'] or 0
         
-        # Monthly KoraQuest commission
-        monthly_koraquest_commission = monthly_purchases.aggregate(
-            total=Sum('koraquest_commission_amount')
+        # Monthly agaseke commission
+        monthly_agaseke_commission = monthly_purchases.aggregate(
+            total=Sum('agaseke_commission_amount')
         )['total'] or 0
         
         # Recent transactions
@@ -314,7 +315,7 @@ def get_vendor_statistics_modal(request, vendor_id):
         
         commission_breakdown = {
             'vendor_earnings': float(total_revenue),
-            'koraquest_commission': float(koraquest_commission),
+            'agaseke_commission': float(agaseke_commission),
             'product_commission': float(total_product_price * Decimal('0.2')),
             'delivery_fees': float(total_delivery_fees),
             'total_transaction_value': float(total_product_price + total_delivery_fees)
@@ -339,10 +340,10 @@ def get_vendor_statistics_modal(request, vendor_id):
                 'total_revenue': float(total_revenue),
                 'monthly_revenue': float(monthly_revenue),
                 'monthly_sales': monthly_purchases.count(),
-                'koraquest_commission': float(koraquest_commission),
-                'monthly_koraquest_commission': float(monthly_koraquest_commission),
+                'agaseke_commission': float(agaseke_commission),
+                'monthly_agaseke_commission': float(monthly_agaseke_commission),
                 'commission_rate': 80,
-                'koraquest_rate': 20
+                'agaseke_rate': 20
             },
             'product_stats': product_stats,
             'recent_transactions': recent_transactions,

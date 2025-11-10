@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-KoraQuest API Test Script
+agaseke API Test Script
 
-This script demonstrates how to use the KoraQuest REST API endpoints.
+This script demonstrates how to use the agaseke REST API endpoints.
 Make sure to run the Django server first: python manage.py runserver
 """
 
@@ -10,7 +10,7 @@ import requests
 import json
 from typing import Dict, Any
 
-class KoraQuestAPIClient:
+class agasekeAPIClient:
     def __init__(self, base_url: str = "http://localhost:8000"):
         self.base_url = base_url
         self.session = requests.Session()
@@ -105,9 +105,9 @@ class KoraQuestAPIClient:
 
 def main():
     """Demonstrate API usage"""
-    client = KoraQuestAPIClient()
+    client = agasekeAPIClient()
     
-    print("🚀 KoraQuest API Test Script")
+    print("🚀 agaseke API Test Script")
     print("=" * 50)
     
     # Test user registration

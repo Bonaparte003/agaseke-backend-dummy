@@ -7,7 +7,8 @@ from datetime import datetime, timedelta
 from django.conf import settings
 from django.core.files.base import ContentFile
 from django.utils import timezone
-from .models import UserQRCode, Purchase
+from .models import UserQRCode
+from products.models import Purchase
 
 def generate_user_qr_data(user):
     """Generate QR data for a user including their purchases"""
