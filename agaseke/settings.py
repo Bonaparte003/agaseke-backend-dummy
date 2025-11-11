@@ -26,7 +26,7 @@ SECRET_KEY = 'django-insecure-yg!+2gbi#185v4j8r!qg&@+%mrl*qti5&1c!7y-sx0d)n(yj&@
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['agaseke.bonasolutions.tech', '9aef-105-178-46-181.ngrok-free.app','127.0.0.1', '192.168.1.198', 'localhost', 'local.stroomup.com']
+ALLOWED_HOSTS = ['agaseke.bonasolutions.tech', '9aef-105-178-46-181.ngrok-free.app','127.0.0.1', '10.0.2.2', 'localhost', 'local.stroomup.com']
 
 CSRF_TRUSTED_ORIGINS = [
     'https://9aef-105-178-46-181.ngrok-free.app',
@@ -36,6 +36,7 @@ CSRF_TRUSTED_ORIGINS = [
     'http://localhost:8000'
     'https://local.stroomup.com',
     'http://192.168.1.198',
+    'http://10.0.2.2:8000'
 ]
 
 # CSRF Configuration - adjusted for mixed HTTP/HTTPS environment
@@ -85,6 +86,9 @@ MIDDLEWARE = [
 
 
 ROOT_URLCONF = 'agaseke.urls'
+
+# Allow URLs without trailing slashes (for API compatibility)
+APPEND_SLASH = False
 
 TEMPLATES = [
     {
@@ -168,18 +172,21 @@ LOGOUT_REDIRECT_URL = 'login'
 
 # Email Configuration for OTP
 # For development, use console backend to see emails in terminal
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+# Email Configuration
+# For development: Use console backend (prints emails to terminal)
+# For production: Use SMTP backend (sends real emails)
 
-# For production, uncomment these lines and comment out the console backend above:
-EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-EMAIL_HOST = 'smtp.gmail.com'
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"  # Use SMTP backend to actually send emails
+EMAIL_HOST = "smtp.gmail.com"
 EMAIL_PORT = 587
 EMAIL_USE_TLS = True
-EMAIL_HOST_USER = 'enter-your-email'
-EMAIL_HOST_PASSWORD = 'enter-your-email-host-password'
+EMAIL_HOST_USER = "hirwacedr12@gmail.com"
+EMAIL_HOST_PASSWORD = ''
+DEFAULT_FROM_EMAIL = EMAIL_HOST_USER  # Using the same email account for authentication and sending
+# Use App Password, not regular password
 
 # Default from email (required for sending emails)
-# DEFAULT_FROM_EMAIL = 'agaseke <noreply@agaseke.com>'
+DEFAULT_FROM_EMAIL = 'KoraQuest <noreply@koraquest.com>'
 
 # QR Code Settings
 QR_CODE_UPDATE_INTERVAL = 600  # 10 minutes in seconds

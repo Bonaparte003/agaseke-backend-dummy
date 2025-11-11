@@ -261,7 +261,8 @@ class UserQRCode(models.Model):
 class OTPVerification(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='otp_verifications')
     otp_code = models.CharField(max_length=6)
-    purpose = models.CharField(max_length=50, default='purchase_confirmation')  # purchase_confirmation, general
+    purpose = models.CharField(max_length=50, default='purchase_confirmation')  # purchase_confirmation, login, general
+    session_id = models.CharField(max_length=100, blank=True, null=True)  # For login OTP sessions
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField()
     is_used = models.BooleanField(default=False)

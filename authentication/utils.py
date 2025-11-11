@@ -79,16 +79,26 @@ def generate_pdf_report(data, filename, title, headers, summary_data=None):
     return response
 
 def get_token_user(request):
-    """Helper function to get user from token authentication"""
+    """Helper function to get user from JWT token authentication"""
     auth_header = request.headers.get('Authorization')
     if not auth_header or not auth_header.startswith('Bearer '):
         return None
     
     token = auth_header.replace('Bearer ', '')
     try:
-        from rest_framework.authtoken.models import Token
-        token_obj = Token.objects.get(key=token)
-        return token_obj.user
-    except:
+        # Decode JWT token
+        from rest_framework_simplejwt.tokens import AccessToken
+        from users.models import User
+        
+        # Validate and decode the token
+        access_token = AccessToken(token)
+        user_id = access_token['user_id']
+        
+        # Get user from database
+        user = User.objects.get(id=user_id)
+        return user
+    except Exception as e:
+        # Token is invalid, expired, or user doesn't exist
+        print(f"Token validation error: {str(e)}")  # For debugging
         return None
 

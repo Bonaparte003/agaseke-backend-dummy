@@ -99,8 +99,8 @@ These endpoints return HTML pages for web browser access.
 
 | Endpoint | Method | Auth | Description | Returns |
 |----------|--------|------|-------------|---------|
-| `/v1/register/` | POST | None | User registration | JSON: User + success |
-| `/v1/login/` | POST | None | User login | JSON: User + token |
+| `/v1/register/` | POST | None | User registration | JSON: User only (no tokens) |
+| `/v1/login/` | POST | None | User login | JSON: User + tokens |
 | `/v1/logout/` | POST | Token | User logout | JSON: Message |
 | `/v1/dashboard/` | GET | Token | Dashboard data | JSON: Posts + filters |
 | `/v1/bookmark/<id>/` | POST | Token | Toggle bookmark | JSON: Bookmark status |
@@ -204,19 +204,34 @@ These endpoints return HTML pages for web browser access.
 │  (v1 API)            │
 └──────────┬──────────┘
            │
-           │ Creates User + Auto-login
+           │ Creates User (NO AUTO-LOGIN)
+           │
+           ▼
+┌─────────────────────┐
+│  Response (201)     │
+│  - User data        │
+│  - NO tokens        │
+└──────────┬──────────┘
+           │
+           │ User must now login
+           ▼
+┌─────────────────────┐
+│  POST /auth/v1/login/│
+│  - Username/Password │
+└──────────┬──────────┘
            │
            ▼
 ┌─────────────────────┐
 │  Response (200)     │
 │  - User data        │
-│  - Auth token       │
+│  - Auth tokens      │
 └──────────┬──────────┘
            │
            ▼
 ┌─────────────────────┐
 │  Client stores      │
-│  - Auth token       │
+│  - Access token     │
+│  - Refresh token    │
 └─────────────────────┘
 ```
 
@@ -459,19 +474,22 @@ Authorization: Bearer <token_key>
 
 ```
 1. POST /auth/v1/register/
-   → Returns: User + Auth token
+   → Returns: User data only (NO tokens)
 
-2. GET /auth/v1/dashboard/
+2. POST /auth/v1/login/
+   → Returns: User + Auth tokens
+
+3. GET /auth/v1/dashboard/
    → Returns: Product list
 
-3. GET /auth/post/<id>/
+4. GET /auth/post/<id>/
    → Returns: Product details (Web page)
 
-4. POST /auth/post/<id>/purchase/
+5. POST /auth/post/<id>/purchase/
    → Returns: Purchase created
    → Status: awaiting_pickup
 
-5. GET /auth/purchases/
+6. GET /auth/purchases/
    → Returns: User's purchase history (Web page)
 ```
 

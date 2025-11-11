@@ -1,5 +1,6 @@
 import random
 import string
+import uuid
 from django.core.mail import send_mail, EmailMultiAlternatives
 from django.conf import settings
 from django.utils import timezone
@@ -19,6 +20,10 @@ def send_otp_email(user, otp_code, purpose='purchase_confirmation'):
         email_title = "Purchase Verification Required"
         email_subtitle = "Please verify your identity to complete your purchase pickup"
         action_text = "complete your purchase pickup"
+    elif purpose == 'login':
+        email_title = "Login Verification Required"
+        email_subtitle = "Please verify your identity to complete your login"
+        action_text = "complete your login"
     else:
         email_title = "Verification Required"
         email_subtitle = "Please verify your identity"
@@ -257,7 +262,7 @@ def send_otp_email(user, otp_code, purpose='purchase_confirmation'):
         print(f"Failed to send OTP email: {e}")
         return False
 
-def create_otp(user, purpose='purchase_confirmation'):
+def create_otp(user, purpose='purchase_confirmation', session_id=None):
     """Create and send OTP to user"""
     # Invalidate any existing unused OTPs for this user and purpose
     OTPVerification.objects.filter(
@@ -269,11 +274,16 @@ def create_otp(user, purpose='purchase_confirmation'):
     # Generate new OTP
     otp_code = generate_otp()
     
+    # Generate session_id if not provided (for login OTP)
+    if purpose == 'login' and not session_id:
+        session_id = str(uuid.uuid4())
+    
     # Create OTP record
     otp = OTPVerification.objects.create(
         user=user,
         otp_code=otp_code,
         purpose=purpose,
+        session_id=session_id,
         expires_at=timezone.now() + timedelta(minutes=5)
     )
     
@@ -282,19 +292,27 @@ def create_otp(user, purpose='purchase_confirmation'):
     
     return {
         'otp_id': otp.id,
+        'session_id': session_id,
         'email_sent': email_sent,
         'expires_at': otp.expires_at
     }
 
-def verify_otp(user, otp_code, purpose='purchase_confirmation'):
+def verify_otp(user, otp_code, purpose='purchase_confirmation', session_id=None):
     """Verify OTP code"""
     try:
-        otp = OTPVerification.objects.get(
-            user=user,
-            otp_code=otp_code,
-            purpose=purpose,
-            is_used=False
-        )
+        # Build query filters
+        filters = {
+            'user': user,
+            'otp_code': otp_code,
+            'purpose': purpose,
+            'is_used': False
+        }
+        
+        # Add session_id filter if provided (for login OTP)
+        if session_id:
+            filters['session_id'] = session_id
+        
+        otp = OTPVerification.objects.get(**filters)
         
         if otp.is_expired():
             return {'valid': False, 'error': 'OTP has expired'}
@@ -303,10 +321,10 @@ def verify_otp(user, otp_code, purpose='purchase_confirmation'):
         otp.is_used = True
         otp.save()
         
-        return {'valid': True, 'otp_id': otp.id}
+        return {'valid': True, 'otp_id': otp.id, 'user': user}
     
     except OTPVerification.DoesNotExist:
-        return {'valid': False, 'error': 'Invalid OTP code'}
+        return {'valid': False, 'error': 'Invalid OTP code or session'}
 
 def cleanup_expired_otps():
     """Clean up expired OTPs (can be run as a cron job)"""

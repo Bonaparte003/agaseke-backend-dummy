@@ -59,13 +59,16 @@ api_endpoints = [
     # Authentication
     path('v1/register/', views.register_api, name='register_api'),
     path('v1/login/', views.login_api, name='login_api'),
+    path('v1/login/verify-otp/', views.verify_login_otp_api, name='verify_login_otp_api'),
     path('v1/logout/', views.logout_api, name='logout_api'),
     path('v1/token/refresh/', views.refresh_token_api, name='refresh_token_api'),
     
     # Dashboard & Products
     path('v1/dashboard/', views.dashboard_api, name='dashboard_api'),
-    path('v1/posts/<int:post_id>/', posts_views.post_detail_api, name='post_detail_api'),
-    path('v1/posts/', products_views.create_product_api, name='create_product_api'),  # POST to create product
+    path('v1/posts/<int:post_id>/', posts_views.post_detail_api, name='post_detail_api'),  # GET - View post
+    path('v1/posts/', products_views.create_product_api, name='create_product_api'),  # POST - Create product
+    path('v1/posts/<int:post_id>/edit/', products_views.edit_product_api, name='edit_product_api'),  # PUT/PATCH - Edit product
+    path('v1/posts/<int:post_id>/delete/', products_views.delete_product_api, name='delete_product_api'),  # DELETE - Delete product
     path('v1/posts/<int:post_id>/purchase/', products_views.purchase_product_api, name='purchase_product_api'),
     
     # User interactions

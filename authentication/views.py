@@ -148,29 +148,10 @@ def register_api(request):
         if form.is_valid():
             user = form.save()
             
-            # Generate JWT tokens
-            tokens = get_tokens_for_user(user)
-            
-            # Return success response with user data and JWT tokens
+            # Return success response with user data (no tokens - user must login)
             return JsonResponse({
                 'success': True,
-                'message': 'Account created successfully',
-                'data': {
-                    'user': {
-                        'id': user.id,
-                        'username': user.username,
-                        'email': user.email,
-                        'first_name': user.first_name,
-                        'last_name': user.last_name,
-                        'role': user.role,
-                        'is_vendor_role': user.is_vendor_role,
-                        'phone_number': getattr(user, 'phone_number', '') or '',
-                    },
-                    'tokens': {
-                        'access': tokens['access'],
-                        'refresh': tokens['refresh'],
-                    }
-                }
+                'message': 'Account created successfully. Please login to continue.',
             }, status=201)  # 201 for successful creation
         else:
             # Return validation errors
@@ -241,33 +222,26 @@ def login_api(request):
         
         if user is not None:
             if user.is_active:
-                # Update last login time
-                from django.contrib.auth.models import update_last_login
-                update_last_login(None, user)
+                # Create OTP for login verification
+                otp_result = create_otp(user, purpose='login')
                 
-                # Generate JWT tokens
-                tokens = get_tokens_for_user(user)
+                if not otp_result['email_sent']:
+                    return JsonResponse({
+                        'success': False,
+                        'message': 'Failed to send OTP email',
+                        'errors': {
+                            'email': ['Could not send verification code. Please try again.']
+                        }
+                    }, status=500)
                 
-                # Return successful login response with user data and JWT tokens
+                # Return session_id for OTP verification
                 return JsonResponse({
                     'success': True,
-                    'message': 'Login successful',
+                    'message': 'OTP sent to your email. Please verify to complete login.',
                     'data': {
-                        'user': {
-                            'id': user.id,
-                            'username': user.username,
-                            'email': user.email,
-                            'first_name': user.first_name,
-                            'last_name': user.last_name,
-                            'role': user.role,
-                            'is_vendor_role': user.is_vendor_role,
-                            'phone_number': getattr(user, 'phone_number', '') or '',
-                            'last_login': user.last_login.isoformat() if user.last_login else None
-                        },
-                        'tokens': {
-                            'access': tokens['access'],
-                            'refresh': tokens['refresh'],
-                        }
+                        'session_id': otp_result['session_id'],
+                        'email': user.email,
+                        'expires_in': 300  # 5 minutes in seconds
                     }
                 }, status=200)
                     
@@ -301,6 +275,113 @@ def login_api(request):
             'message': 'Internal server error',
             'errors': {
                 'server': ['An unexpected error occurred during login']
+            }
+        }, status=500)
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def verify_login_otp_api(request):
+    """API endpoint to verify OTP and complete login"""
+    try:
+        # Parse request data
+        content_type = request.content_type
+        if content_type == 'application/json':
+            try:
+                data = json.loads(request.body)
+            except json.JSONDecodeError:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Invalid JSON data',
+                    'errors': {'json': ['Request body contains invalid JSON']}
+                }, status=400)
+        else:
+            data = request.POST.dict()
+        
+        # Validate required fields
+        session_id = data.get('session_id')
+        otp_code = data.get('otp_code')
+        
+        if not session_id or not otp_code:
+            return JsonResponse({
+                'success': False,
+                'message': 'Missing required fields',
+                'errors': {
+                    'fields': ['Both session_id and otp_code are required']
+                }
+            }, status=400)
+        
+        # Find the OTP record by session_id
+        try:
+            otp_record = OTPVerification.objects.get(
+                session_id=session_id,
+                purpose='login',
+                is_used=False
+            )
+        except OTPVerification.DoesNotExist:
+            return JsonResponse({
+                'success': False,
+                'message': 'Invalid or expired session',
+                'errors': {
+                    'session': ['Login session not found or has expired']
+                }
+            }, status=400)
+        
+        # Get user from OTP record
+        user = otp_record.user
+        
+        # Verify OTP
+        verification_result = verify_otp(user, otp_code, purpose='login', session_id=session_id)
+        
+        if not verification_result['valid']:
+            return JsonResponse({
+                'success': False,
+                'message': 'OTP verification failed',
+                'errors': {
+                    'otp': [verification_result.get('error', 'Invalid OTP code')]
+                }
+            }, status=400)
+        
+        # OTP verified successfully - update last login and generate tokens
+        from django.contrib.auth.models import update_last_login
+        update_last_login(None, user)
+        
+        # Generate JWT tokens
+        tokens = get_tokens_for_user(user)
+        
+        # Return successful login response with tokens
+        return JsonResponse({
+            'success': True,
+            'message': 'Login successful',
+            'data': {
+                'user': {
+                    'id': user.id,
+                    'username': user.username,
+                    'email': user.email,
+                    'first_name': user.first_name,
+                    'last_name': user.last_name,
+                    'role': user.role,
+                    'is_vendor_role': user.is_vendor_role,
+                    'phone_number': getattr(user, 'phone_number', '') or '',
+                    'last_login': user.last_login.isoformat() if user.last_login else None
+                },
+                'tokens': {
+                    'access': tokens['access'],
+                    'refresh': tokens['refresh'],
+                }
+            }
+        }, status=200)
+        
+    except Exception as e:
+        # Handle unexpected errors
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Verify login OTP error: {str(e)}")
+        
+        return JsonResponse({
+            'success': False,
+            'message': 'Internal server error',
+            'errors': {
+                'server': ['An unexpected error occurred during OTP verification']
             }
         }, status=500)
 

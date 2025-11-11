@@ -494,6 +494,212 @@ def create_product_api(request):
             'errors': {'server': [str(e)]}
         }, status=500)
 
+@csrf_exempt
+@require_http_methods(['PUT', 'PATCH'])
+def edit_product_api(request, post_id):
+    """API endpoint to edit/update a product"""
+    try:
+        # Get user from token
+        user = get_token_user(request)
+        if not user:
+            return JsonResponse({
+                'success': False,
+                'message': 'Authentication required',
+                'errors': {'auth': ['Please provide valid authentication credentials']}
+            }, status=401)
+        
+        # Check if user is a vendor
+        if not user.is_vendor_role:
+            return JsonResponse({
+                'success': False,
+                'message': 'Vendor role required',
+                'errors': {'role': ['You need to be a vendor to edit products']}
+            }, status=403)
+        
+        # Get the product
+        try:
+            post = Post.objects.get(id=post_id, user=user)
+        except Post.DoesNotExist:
+            return JsonResponse({
+                'success': False,
+                'message': 'Product not found',
+                'errors': {'product': ['Product not found or you do not have permission to edit it']}
+            }, status=404)
+        
+        # Business Rule: Check if product has been purchased or bookmarked
+        has_purchases = Purchase.objects.filter(product=post).exists()
+        has_bookmarks = Bookmark.objects.filter(post=post).exists()
+        
+        if has_purchases or has_bookmarks:
+            return JsonResponse({
+                'success': False,
+                'message': 'Cannot edit this product',
+                'errors': {'product': ['This product cannot be edited as it has been purchased or bookmarked by customers']}
+            }, status=403)
+        
+        # Parse request data (support form-data for file uploads)
+        if request.content_type and 'application/json' in request.content_type:
+            return JsonResponse({
+                'success': False,
+                'message': 'Use multipart/form-data for file uploads',
+                'errors': {'content_type': ['Please use multipart/form-data for product updates with images']}
+            }, status=400)
+        
+        # Get form data
+        title = request.POST.get('title', post.title)
+        description = request.POST.get('description', post.description)
+        price = request.POST.get('price', post.price)
+        category = request.POST.get('category', post.category)
+        inventory = request.POST.get('inventory', post.inventory)
+        main_image = request.FILES.get('main_image')  # Optional for updates
+        
+        # Validate price if provided
+        if price:
+            try:
+                price_decimal = Decimal(str(price))
+                if price_decimal <= 0:
+                    raise ValueError("Price must be positive")
+                post.price = price_decimal
+            except (ValueError, TypeError):
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Invalid price',
+                    'errors': {'price': ['Price must be a positive number']}
+                }, status=400)
+        
+        # Validate inventory if provided
+        if inventory:
+            try:
+                inventory_int = int(inventory)
+                if inventory_int < 0:
+                    inventory_int = 0
+                post.inventory = inventory_int
+            except (ValueError, TypeError):
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Invalid inventory',
+                    'errors': {'inventory': ['Inventory must be a non-negative integer']}
+                }, status=400)
+        
+        # Validate category if provided
+        if category:
+            valid_categories = [choice[0] for choice in Post.CATEGORY_CHOICES]
+            if category not in valid_categories:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Invalid category',
+                    'errors': {'category': [f'Must be one of: {", ".join(valid_categories)}']}
+                }, status=400)
+            post.category = category
+        
+        # Update fields
+        post.title = title
+        post.description = description
+        
+        # Update main image if provided
+        if main_image:
+            post.image = main_image
+        
+        post.save()
+        
+        # Handle auxiliary images if provided
+        auxiliary_images = request.FILES.getlist('auxiliary_images')
+        if auxiliary_images:
+            # Remove old auxiliary images
+            ProductImage.objects.filter(product=post).delete()
+            
+            # Add new ones (limit to 5)
+            max_images = min(len(auxiliary_images), 5)
+            for i in range(max_images):
+                ProductImage.objects.create(
+                    product=post,
+                    image=auxiliary_images[i],
+                    display_order=i
+                )
+        
+        # Serialize and return
+        post_data = serialize_post(post, user)
+        
+        return JsonResponse({
+            'success': True,
+            'message': 'Product updated successfully',
+            'data': post_data
+        }, status=200)
+        
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'message': 'Error updating product',
+            'errors': {'server': [str(e)]}
+        }, status=500)
+
+@csrf_exempt
+@require_http_methods(['DELETE', 'POST'])
+def delete_product_api(request, post_id):
+    """API endpoint to delete a product"""
+    try:
+        # Get user from token
+        user = get_token_user(request)
+        if not user:
+            return JsonResponse({
+                'success': False,
+                'message': 'Authentication required',
+                'errors': {'auth': ['Please provide valid authentication credentials']}
+            }, status=401)
+        
+        # Check if user is a vendor
+        if not user.is_vendor_role:
+            return JsonResponse({
+                'success': False,
+                'message': 'Vendor role required',
+                'errors': {'role': ['You need to be a vendor to delete products']}
+            }, status=403)
+        
+        # Get the product
+        try:
+            post = Post.objects.get(id=post_id, user=user)
+        except Post.DoesNotExist:
+            return JsonResponse({
+                'success': False,
+                'message': 'Product not found',
+                'errors': {'product': ['Product not found or you do not have permission to delete it']}
+            }, status=404)
+        
+        # Business Rule: Check if product has been purchased
+        has_purchases = Purchase.objects.filter(product=post).exists()
+        
+        if has_purchases:
+            return JsonResponse({
+                'success': False,
+                'message': 'Cannot delete this product',
+                'errors': {'product': ['This product cannot be deleted as it has purchase history']}
+            }, status=403)
+        
+        # Store product info before deletion
+        product_info = {
+            'id': post.id,
+            'title': post.title,
+            'price': str(post.price)
+        }
+        
+        # Delete the product
+        post.delete()
+        
+        return JsonResponse({
+            'success': True,
+            'message': 'Product deleted successfully',
+            'data': {
+                'deleted_product': product_info
+            }
+        }, status=200)
+        
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'message': 'Error deleting product',
+            'errors': {'server': [str(e)]}
+        }, status=500)
+
 @login_required
 def edit_product(request, product_id):
     # Check if user has vendor role
