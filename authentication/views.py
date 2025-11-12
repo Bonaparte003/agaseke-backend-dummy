@@ -699,12 +699,12 @@ def dashboard_api(request):
         from posts.models import Category
         categories = Category.objects.filter(is_active=True).order_by('display_order', 'name')
         categories_data = []
-        for category in categories:
+        for cat in categories:
             categories_data.append({
-                'id': category.id,
-                'name': category.name,
-                'slug': category.slug,
-                'category_image': category.category_image.url if category.category_image else None
+                'id': cat.id,
+                'name': cat.name,
+                'slug': cat.slug,
+                'category_image': cat.category_image.url if cat.category_image else None
             })
         
         # Build response
@@ -759,8 +759,10 @@ def dashboard_api(request):
         
     except Exception as e:
         import logging
+        import traceback
         logger = logging.getLogger(__name__)
         logger.error(f"Dashboard API error: {str(e)}")
+        logger.error(f"Full traceback:\n{traceback.format_exc()}")
         
         return JsonResponse({
             'success': False,

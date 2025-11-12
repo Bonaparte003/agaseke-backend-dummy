@@ -13,18 +13,23 @@ Complete guide for all endpoints available to regular users (non-vendor, non-aga
 POST /auth/v1/register/
 ```
 
-**Request:**
+**Request:** *(Single password field)*
 ```json
 {
   "username": "johndoe",
   "email": "john@example.com",
-  "password1": "securepassword123",
-  "password2": "securepassword123",
+  "password": "securepassword123",
   "first_name": "John",
   "last_name": "Doe",
   "phone_number": "+250123456789"
 }
 ```
+
+**Validation:**
+- Username: Min 3 chars, unique
+- Email: Valid format, unique
+- Password: Min 8 chars
+- Phone: Min 10 digits
 
 **Response:**
 ```json
@@ -38,13 +43,13 @@ POST /auth/v1/register/
       "email": "john@example.com",
       "first_name": "John",
       "last_name": "Doe",
-      "role": "user",
-      "is_vendor_role": false,
       "phone_number": "+250123456789"
     }
   }
 }
 ```
+
+**Note:** Password confirmation should be handled on the frontend.
 
 ---
 

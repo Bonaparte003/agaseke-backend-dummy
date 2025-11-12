@@ -45,19 +45,26 @@ After **OTP verification**, you receive **JWT tokens**:
 ## 🔐 Authentication Endpoints
 
 ### POST `/auth/v1/register/`
-**Sign Up** - Creates new account
+**Sign Up** - Creates new account (single password field)
 
 **Request:**
 ```json
 {
   "username": "johndoe",
   "email": "john@example.com",
-  "password1": "securepassword123",
-  "password2": "securepassword123",
+  "password": "securepassword123",
   "first_name": "John",
-  "last_name": "Doe"
+  "last_name": "Doe",
+  "phone_number": "+250123456789"
 }
 ```
+
+**Validation Rules:**
+- Username: Min 3 characters, must be unique
+- Email: Valid email format, must be unique
+- Password: Min 8 characters
+- Phone: Min 10 digits
+- All fields required
 
 **Response:** ✅ Returns user data only (no tokens)
 ```json
@@ -71,15 +78,15 @@ After **OTP verification**, you receive **JWT tokens**:
       "email": "john@example.com",
       "first_name": "John",
       "last_name": "Doe",
-      "role": "user",
-      "is_vendor_role": false,
       "phone_number": "+250123456789"
     }
   }
 }
 ```
 
-**Note:** Users must explicitly login after registration to receive tokens.
+**Note:** 
+- Only **one password field** required (password confirmation handled on frontend)
+- Users must explicitly login after registration to receive tokens
 
 ---
 
