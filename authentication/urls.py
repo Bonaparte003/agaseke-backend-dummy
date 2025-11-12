@@ -5,6 +5,8 @@ from django.contrib.auth import views as auth_views
 from users import views as users_views
 from posts import views as posts_views
 from products import views as products_views
+from products import cart_views
+from products import search_views
 
 urlpatterns = [
     path('register/', views.register, name='register'),  # Still in authentication
@@ -85,6 +87,17 @@ api_endpoints = [
     
     # Categories
     path('v1/categories/', products_views.categories_api, name='categories_api'),
+    
+    # Shopping Cart
+    path('v1/cart/', cart_views.view_cart_api, name='view_cart_api'),  # GET - View cart
+    path('v1/cart/add/', cart_views.add_to_cart_api, name='add_to_cart_api'),  # POST - Add to cart
+    path('v1/cart/item/<int:item_id>/', cart_views.update_cart_item_api, name='update_cart_item_api'),  # PUT/PATCH - Update quantity
+    path('v1/cart/item/<int:item_id>/remove/', cart_views.remove_from_cart_api, name='remove_from_cart_api'),  # DELETE - Remove item
+    path('v1/cart/clear/', cart_views.clear_cart_api, name='clear_cart_api'),  # POST/DELETE - Clear cart
+    
+    # Search
+    path('v1/search/', search_views.search_products_api, name='search_products_api'),  # GET - Advanced search
+    path('v1/search/suggestions/', search_views.search_suggestions_api, name='search_suggestions_api'),  # GET - Autocomplete
 ]
 
 # Add api_endpoints to main urlpatterns

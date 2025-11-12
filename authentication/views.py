@@ -577,11 +577,22 @@ def dashboard_api(request):
         
         # Apply search filter if provided
         if search_query:
-            posts = posts.filter(
-                Q(title__icontains=search_query) |
-                Q(description__icontains=search_query) |
-                Q(user__username__icontains=search_query)
-            )
+            # Split search query into individual words for better matching
+            search_words = search_query.strip().split()
+            
+            # Build query for each word (all words must match at least one field)
+            search_filter = Q()
+            for word in search_words:
+                word_filter = Q()
+                word_filter |= Q(title__icontains=word)
+                word_filter |= Q(description__icontains=word)
+                word_filter |= Q(user__username__icontains=word)
+                word_filter |= Q(user__first_name__icontains=word)
+                word_filter |= Q(user__last_name__icontains=word)
+                word_filter |= Q(category__name__icontains=word)
+                search_filter &= word_filter  # AND all words together
+            
+            posts = posts.filter(search_filter)
         
         # Apply category filter if provided
         if category:
