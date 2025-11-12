@@ -201,21 +201,21 @@ def register_api(request):
             phone_number=phone_number,
             role='user'  # Default role
         )
-        
+            
         # Return success response (no tokens - user must login)
         return JsonResponse({
-            'success': True,
+                'success': True,
             'message': 'Account created successfully. Please login to continue.',
-            'data': {
-                'user': {
-                    'id': user.id,
-                    'username': user.username,
-                    'email': user.email,
-                    'first_name': user.first_name,
-                    'last_name': user.last_name,
+                'data': {
+                    'user': {
+                        'id': user.id,
+                        'username': user.username,
+                        'email': user.email,
+                        'first_name': user.first_name,
+                        'last_name': user.last_name,
                     'phone_number': user.phone_number
+                    }
                 }
-            }
         }, status=201)
             
     except Exception as e:
@@ -297,7 +297,7 @@ def login_api(request):
                     'message': 'OTP sent to your email. Please verify to complete login.',
                     'data': {
                         'session_id': otp_result['session_id'],
-                        'email': user.email,
+                            'email': user.email,
                         'expires_in': 300  # 5 minutes in seconds
                     }
                 }, status=200)
@@ -1988,6 +1988,85 @@ def update_qr_code_ajax(request):
         })
     
     return JsonResponse({'success': False, 'error': 'Invalid request method'})
+
+
+@csrf_exempt
+@require_http_methods(['GET', 'POST'])
+def user_qr_code_api(request):
+    """
+    API endpoint to get user's QR code in base64 format
+    
+    GET - Get existing QR code
+    POST - Generate/refresh QR code
+    
+    Returns QR code as base64 string
+    """
+    try:
+        # Get user from token
+        user = get_token_user(request)
+        if not user:
+            return JsonResponse({
+                'success': False,
+                'message': 'Authentication required',
+                'errors': {'auth': ['Please provide valid authentication credentials']}
+            }, status=401)
+        
+        # Generate or update QR code
+        from .qr_utils import update_user_qr_code, create_qr_image, generate_user_qr_data
+        import base64
+        from io import BytesIO
+        
+        # Update/create QR code for the user
+        user_qr = update_user_qr_code(user)
+        
+        # Read the QR code image and convert to base64
+        qr_image_base64 = None
+        if user_qr.qr_image:
+            try:
+                # Read the image file
+                user_qr.qr_image.open('rb')
+                image_data = user_qr.qr_image.read()
+                user_qr.qr_image.close()
+                
+                # Convert to base64
+                qr_image_base64 = base64.b64encode(image_data).decode('utf-8')
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Error reading QR image: {str(e)}")
+        
+        # Get pending purchases count
+        from products.models import Purchase
+        pending_purchases = Purchase.objects.filter(
+            buyer=user,
+            status__in=['awaiting_pickup', 'awaiting_delivery']
+        )
+        
+        return JsonResponse({
+            'success': True,
+            'message': 'QR code generated successfully',
+            'data': {
+                'qr_code_base64': qr_image_base64,  # Base64 encoded PNG image
+                'qr_code_data': user_qr.qr_data,    # Raw QR data (JWT token)
+                'expires_at': user_qr.expires_at.isoformat(),
+                'pending_purchases_count': pending_purchases.count(),
+                'image_format': 'png',
+                'encoding': 'base64'
+            }
+        }, status=200)
+        
+    except Exception as e:
+        import logging
+        import traceback
+        logger = logging.getLogger(__name__)
+        logger.error(f"QR code API error: {str(e)}")
+        logger.error(traceback.format_exc())
+        
+        return JsonResponse({
+            'success': False,
+            'message': 'Error generating QR code',
+            'errors': {'server': [str(e)]}
+        }, status=500)
 
 # @login_required
 # def agaseke_purchase_history(request):

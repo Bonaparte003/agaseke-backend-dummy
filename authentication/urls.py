@@ -81,6 +81,7 @@ api_endpoints = [
     # User data
     path('v1/purchases/', users_views.purchase_history_api, name='purchase_history_api'),
     path('v1/settings/', users_views.user_settings_api, name='user_settings_api'),
+    path('v1/qr-code/', views.user_qr_code_api, name='user_qr_code_api'),  # GET/POST - Get QR code in base64
     path('v1/become-vendor/', users_views.become_vendor_api, name='become_vendor_api'),
     path('v1/vendor-dashboard/', users_views.vendor_dashboard_api, name='vendor_dashboard_api'),
     path('v1/agaseke-dashboard/', views.agaseke_dashboard_api, name='agaseke_dashboard_api'),
