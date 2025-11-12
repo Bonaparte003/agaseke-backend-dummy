@@ -59,7 +59,21 @@ class Post(models.Model):
     likes = models.ManyToManyField(User, related_name='liked_posts', blank=True)
     
     # Product fields
-    price = models.DecimalField(max_digits=10, decimal_places=2)
+    price = models.DecimalField(max_digits=10, decimal_places=2, help_text="Current selling price")
+    
+    # Great Deal feature
+    is_great_deal = models.BooleanField(
+        default=False,
+        help_text="Mark this product as a great deal with discounted pricing"
+    )
+    original_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Original price before discount (shown when is_great_deal=True)"
+    )
+    
     # NEW: Use ForeignKey to Category model
     category = models.ForeignKey(
         Category,
@@ -93,6 +107,19 @@ class Post(models.Model):
     
     def is_sold_out(self):
         return self.inventory <= 0
+    
+    def discount_percentage(self):
+        """Calculate discount percentage if this is a great deal"""
+        if self.is_great_deal and self.original_price and self.original_price > 0:
+            discount = ((self.original_price - self.price) / self.original_price) * 100
+            return round(discount, 1)
+        return 0
+    
+    def savings_amount(self):
+        """Calculate savings amount if this is a great deal"""
+        if self.is_great_deal and self.original_price:
+            return self.original_price - self.price
+        return 0
     
     class Meta:
         ordering = ['-created_at']

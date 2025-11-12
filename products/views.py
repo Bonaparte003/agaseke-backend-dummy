@@ -487,6 +487,27 @@ def create_product_api(request):
             except Category.DoesNotExist:
                 pass
         
+        # Handle great_deal fields
+        is_great_deal = request.POST.get('is_great_deal', 'false').lower() == 'true'
+        original_price = request.POST.get('original_price')
+        original_price_decimal = None
+        
+        if is_great_deal and original_price:
+            try:
+                original_price_decimal = Decimal(str(original_price))
+                if original_price_decimal <= price_decimal:
+                    return JsonResponse({
+                        'success': False,
+                        'message': 'Invalid pricing',
+                        'errors': {'original_price': ['Original price must be greater than discounted price']}
+                    }, status=400)
+            except (ValueError, TypeError):
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Invalid original price',
+                    'errors': {'original_price': ['Original price must be a valid number']}
+                }, status=400)
+        
         # Create product
         post = Post(
             title=title,
@@ -494,6 +515,8 @@ def create_product_api(request):
             image=main_image,
             user=user,
             price=price_decimal,
+            is_great_deal=is_great_deal,
+            original_price=original_price_decimal if is_great_deal else None,
             category=category_obj,
             inventory=inventory
         )
@@ -638,6 +661,33 @@ def edit_product_api(request, post_id):
                     'message': 'Error updating category',
                     'errors': {'category': [str(e)]}
                 }, status=400)
+        
+        # Handle great_deal fields
+        is_great_deal_input = request.POST.get('is_great_deal')
+        if is_great_deal_input is not None:
+            post.is_great_deal = is_great_deal_input.lower() == 'true'
+        
+        original_price_input = request.POST.get('original_price')
+        if original_price_input:
+            try:
+                original_price_decimal = Decimal(str(original_price_input))
+                if post.is_great_deal and original_price_decimal <= post.price:
+                    return JsonResponse({
+                        'success': False,
+                        'message': 'Invalid pricing',
+                        'errors': {'original_price': ['Original price must be greater than discounted price']}
+                    }, status=400)
+                post.original_price = original_price_decimal
+            except (ValueError, TypeError):
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Invalid original price',
+                    'errors': {'original_price': ['Original price must be a valid number']}
+                }, status=400)
+        
+        # If great_deal is disabled, clear original_price
+        if not post.is_great_deal:
+            post.original_price = None
         
         # Update fields
         post.title = title

@@ -596,13 +596,26 @@ def dashboard_api(request):
             avg_rating = reviews.aggregate(avg=Avg('rating'))['avg']
             avg_rating = round(avg_rating, 1) if avg_rating else None
             
+            # Serialize category
+            category_data = None
+            if post.category:
+                category_data = {
+                    'id': post.category.id,
+                    'name': post.category.name,
+                    'slug': post.category.slug,
+                    'category_image': post.category.category_image.url if post.category.category_image else None
+                }
+            
             post_data = {
                 'id': post.id,
                 'title': post.title,
                 'description': post.description,
                 'price': float(post.price) if post.price else None,
-                'category': post.category,
-                'category_display': post.get_category_display(),
+                'is_great_deal': post.is_great_deal,
+                'original_price': float(post.original_price) if post.original_price else None,
+                'discount_percentage': post.discount_percentage() if post.is_great_deal else None,
+                'savings_amount': float(post.savings_amount()) if post.is_great_deal else None,
+                'category': category_data,
                 'inventory': post.inventory,
                 'created_at': post.created_at.isoformat(),
                 'updated_at': post.updated_at.isoformat(),

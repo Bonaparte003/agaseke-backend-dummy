@@ -45,10 +45,38 @@ class CategoryAdmin(admin.ModelAdmin):
     product_count_display.short_description = 'Products'
 
 class PostAdmin(admin.ModelAdmin):
-    list_display = ('title', 'user', 'price', 'category', 'inventory', 'created_at')
-    list_filter = ('category', 'created_at')
+    list_display = ('title', 'user', 'price', 'is_great_deal_display', 'category', 'inventory', 'created_at')
+    list_filter = ('category', 'is_great_deal', 'created_at')
     search_fields = ('title', 'description')
     autocomplete_fields = ['category']  # Searchable dropdown for category
+    
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('title', 'description', 'user', 'category', 'image')
+        }),
+        ('Pricing', {
+            'fields': ('price', 'is_great_deal', 'original_price'),
+            'description': 'Set is_great_deal=True and enter original_price to show discount savings'
+        }),
+        ('Inventory', {
+            'fields': ('inventory',)
+        }),
+        ('Stats', {
+            'fields': ('total_purchases',),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    def is_great_deal_display(self, obj):
+        """Show great deal badge in list view"""
+        if obj.is_great_deal:
+            discount = obj.discount_percentage()
+            return format_html(
+                '<span style="background: #ff4444; color: white; padding: 2px 8px; border-radius: 3px; font-weight: bold;">-{}%</span>',
+                discount
+            )
+        return '-'
+    is_great_deal_display.short_description = 'Deal'
 
 class ProductReviewAdmin(admin.ModelAdmin):
     list_display = ('reviewer', 'product', 'rating', 'created_at')
