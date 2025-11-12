@@ -123,7 +123,7 @@ def register(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 def register_api(request):
-    """API endpoint for user registration"""
+    """API endpoint for user registration - accepts single password field"""
     try:
         # Check content type
         content_type = request.content_type
@@ -139,27 +139,84 @@ def register_api(request):
                     'errors': {'json': ['Request body contains invalid JSON']}
                 }, status=400)
         else:
-            # Handle form data (your current approach)
-            data = request.POST
+            # Handle form data
+            data = request.POST.dict()
         
-        # Create form with data
-        form = SignUpForm(data)
+        # Extract required fields
+        username = data.get('username', '').strip()
+        email = data.get('email', '').strip()
+        first_name = data.get('first_name', '').strip()
+        last_name = data.get('last_name', '').strip()
+        phone_number = data.get('phone_number', '').strip()
+        password = data.get('password', '')
         
-        if form.is_valid():
-            user = form.save()
-            
-            # Return success response with user data (no tokens - user must login)
-            return JsonResponse({
-                'success': True,
-                'message': 'Account created successfully. Please login to continue.',
-            }, status=201)  # 201 for successful creation
-        else:
-            # Return validation errors
+        # Validate required fields
+        errors = {}
+        
+        if not username:
+            errors['username'] = ['This field is required']
+        elif User.objects.filter(username=username).exists():
+            errors['username'] = ['A user with that username already exists']
+        elif len(username) < 3:
+            errors['username'] = ['Username must be at least 3 characters long']
+        
+        if not email:
+            errors['email'] = ['This field is required']
+        elif User.objects.filter(email=email).exists():
+            errors['email'] = ['A user with that email already exists']
+        elif '@' not in email:
+            errors['email'] = ['Enter a valid email address']
+        
+        if not first_name:
+            errors['first_name'] = ['This field is required']
+        
+        if not last_name:
+            errors['last_name'] = ['This field is required']
+        
+        if not phone_number:
+            errors['phone_number'] = ['This field is required']
+        elif len(phone_number) < 10:
+            errors['phone_number'] = ['Phone number must be at least 10 digits']
+        
+        if not password:
+            errors['password'] = ['This field is required']
+        elif len(password) < 8:
+            errors['password'] = ['Password must be at least 8 characters long']
+        
+        # If there are validation errors, return them
+        if errors:
             return JsonResponse({
                 'success': False,
                 'message': 'Validation failed',
-                'errors': form.errors
+                'errors': errors
             }, status=400)
+        
+        # Create user
+        user = User.objects.create_user(
+            username=username,
+            email=email,
+            password=password,
+            first_name=first_name,
+            last_name=last_name,
+            phone_number=phone_number,
+            role='user'  # Default role
+        )
+        
+        # Return success response (no tokens - user must login)
+        return JsonResponse({
+            'success': True,
+            'message': 'Account created successfully. Please login to continue.',
+            'data': {
+                'user': {
+                    'id': user.id,
+                    'username': user.username,
+                    'email': user.email,
+                    'first_name': user.first_name,
+                    'last_name': user.last_name,
+                    'phone_number': user.phone_number
+                }
+            }
+        }, status=201)
             
     except Exception as e:
         # Handle unexpected errors
