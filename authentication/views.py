@@ -528,9 +528,13 @@ def dashboard_api(request):
         
         # Apply category filter if provided
         if category:
-            # Convert to lowercase to match the model's CATEGORY_CHOICES keys
-            category = category.lower()
-            posts = posts.filter(category=category)
+            # Try to filter by category ID first, then by slug
+            try:
+                category_id = int(category)
+                posts = posts.filter(category__id=category_id, category__is_active=True)
+            except (ValueError, TypeError):
+                # Try by slug
+                posts = posts.filter(category__slug=category, category__is_active=True)
         
         # Apply price range filters
         if min_price:
@@ -622,11 +626,15 @@ def dashboard_api(request):
             posts_data.append(post_data)
         
         # Get all categories for the filter dropdown
+        from posts.models import Category
+        categories = Category.objects.filter(is_active=True).order_by('display_order', 'name')
         categories_data = []
-        for choice in Post.CATEGORY_CHOICES:
+        for category in categories:
             categories_data.append({
-                'value': choice[0],
-                'label': choice[1]
+                'id': category.id,
+                'name': category.name,
+                'slug': category.slug,
+                'category_image': category.category_image.url if category.category_image else None
             })
         
         # Build response

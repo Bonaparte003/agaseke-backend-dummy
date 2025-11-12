@@ -7,7 +7,7 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from posts.models import Post, Bookmark
+from posts.models import Post, Bookmark, Category
 from products.models import Purchase, ProductImage
 from authentication.qr_utils import update_user_qr_code
 from authentication.utils import get_token_user
@@ -17,16 +17,21 @@ from authentication.serializers_helpers import serialize_post, serialize_purchas
 @csrf_exempt
 @require_http_methods(['GET'])
 def categories_api(request):
-    """API endpoint to get all available categories"""
+    """API endpoint to get all available categories with images"""
     try:
+        # Get all active categories from database
+        categories = Category.objects.filter(is_active=True).order_by('display_order', 'name')
+        
         categories_data = []
-        for choice in Post.CATEGORY_CHOICES:
-            # Get count of products in each category
-            count = Post.objects.filter(category=choice[0], inventory__gt=0).count()
+        for category in categories:
             categories_data.append({
-                'value': choice[0],
-                'label': choice[1],
-                'product_count': count
+                'id': category.id,
+                'name': category.name,
+                'slug': category.slug,
+                'description': category.description,
+                'category_image': category.category_image.url if category.category_image else None,
+                'product_count': category.product_count(),
+                'display_order': category.display_order
             })
         
         return JsonResponse({
@@ -332,6 +337,18 @@ def create_product(request):
             inventory = 1
         
         if title and description and main_image and price:
+            # Get category object
+            category_obj = None
+            if category:
+                try:
+                    category_id = int(category)
+                    category_obj = Category.objects.get(id=category_id, is_active=True)
+                except (ValueError, Category.DoesNotExist):
+                    try:
+                        category_obj = Category.objects.get(slug=category, is_active=True)
+                    except Category.DoesNotExist:
+                        pass
+            
             # Create the main product (no post_type needed since all posts are products now)
             post = Post(
                 title=title,
@@ -339,7 +356,7 @@ def create_product(request):
                 image=main_image,
                 user=request.user,
                 price=price,
-                category=category,
+                category=category_obj,
                 inventory=inventory
             )
             post.save()
@@ -446,14 +463,29 @@ def create_product_api(request):
         except (ValueError, TypeError):
             inventory = 1
         
-        # Validate category
-        valid_categories = [choice[0] for choice in Post.CATEGORY_CHOICES]
-        if category and category not in valid_categories:
-            return JsonResponse({
-                'success': False,
-                'message': 'Invalid category',
-                'errors': {'category': [f'Must be one of: {", ".join(valid_categories)}']}
-            }, status=400)
+        # Validate and get category
+        category_obj = None
+        if category:
+            # Try to get category by ID first, then by slug
+            try:
+                category_id = int(category)
+                category_obj = Category.objects.get(id=category_id, is_active=True)
+            except (ValueError, Category.DoesNotExist):
+                # Try by slug
+                try:
+                    category_obj = Category.objects.get(slug=category, is_active=True)
+                except Category.DoesNotExist:
+                    return JsonResponse({
+                        'success': False,
+                        'message': 'Invalid category',
+                        'errors': {'category': ['Category not found or inactive']}
+                    }, status=400)
+        else:
+            # Default to 'other' category if not provided
+            try:
+                category_obj = Category.objects.get(slug='other')
+            except Category.DoesNotExist:
+                pass
         
         # Create product
         post = Post(
@@ -462,7 +494,7 @@ def create_product_api(request):
             image=main_image,
             user=user,
             price=price_decimal,
-            category=category or 'other',
+            category=category_obj,
             inventory=inventory
         )
         post.save()
@@ -549,7 +581,7 @@ def edit_product_api(request, post_id):
         title = request.POST.get('title', post.title)
         description = request.POST.get('description', post.description)
         price = request.POST.get('price', post.price)
-        category = request.POST.get('category', post.category)
+        category_input = request.POST.get('category')
         inventory = request.POST.get('inventory', post.inventory)
         main_image = request.FILES.get('main_image')  # Optional for updates
         
@@ -581,16 +613,31 @@ def edit_product_api(request, post_id):
                     'errors': {'inventory': ['Inventory must be a non-negative integer']}
                 }, status=400)
         
-        # Validate category if provided
-        if category:
-            valid_categories = [choice[0] for choice in Post.CATEGORY_CHOICES]
-            if category not in valid_categories:
+        # Validate and update category if provided
+        if category_input:
+            try:
+                # Try to get category by ID first, then by slug
+                try:
+                    category_id = int(category_input)
+                    category_obj = Category.objects.get(id=category_id, is_active=True)
+                    post.category = category_obj
+                except (ValueError, Category.DoesNotExist):
+                    # Try by slug
+                    try:
+                        category_obj = Category.objects.get(slug=category_input, is_active=True)
+                        post.category = category_obj
+                    except Category.DoesNotExist:
+                        return JsonResponse({
+                            'success': False,
+                            'message': 'Invalid category',
+                            'errors': {'category': ['Category not found or inactive']}
+                        }, status=400)
+            except Exception as e:
                 return JsonResponse({
                     'success': False,
-                    'message': 'Invalid category',
-                    'errors': {'category': [f'Must be one of: {", ".join(valid_categories)}']}
+                    'message': 'Error updating category',
+                    'errors': {'category': [str(e)]}
                 }, status=400)
-            post.category = category
         
         # Update fields
         post.title = title
