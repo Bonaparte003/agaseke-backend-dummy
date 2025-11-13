@@ -553,3 +553,250 @@ def get_vendor_statistics_modal(request, vendor_id):
         return JsonResponse({'error': 'Vendor not found'}, status=404)
     except Exception as e:
         return JsonResponse({'error': str(e)}, status=500)
+
+@csrf_exempt
+@require_http_methods(['GET'])
+def get_all_vendors_api(request):
+    """API endpoint for agaseke agents to get list of all vendors"""
+    # Get user from token (for API authentication)
+    user = get_token_user(request)
+    if not user:
+        return JsonResponse({
+            'error': 'Authentication required'
+        }, status=401)
+    
+    if not user.is_agaseke():
+        return JsonResponse({'error': 'Access denied. agaseke role required.'}, status=403)
+    
+    try:
+        from django.core.paginator import Paginator
+        
+        # Get query parameters
+        page = int(request.GET.get('page', 1))
+        limit = min(int(request.GET.get('limit', 20)), 100)  # Max 100 per page
+        search_query = request.GET.get('search', '').strip()
+        sort_by = request.GET.get('sort', '-total_sales')  # Default: highest sales first
+        
+        # Get all vendors
+        vendors = User.objects.filter(is_vendor_role=True)
+        
+        # Apply search filter
+        if search_query:
+            from django.db.models import Q
+            vendors = vendors.filter(
+                Q(username__icontains=search_query) |
+                Q(first_name__icontains=search_query) |
+                Q(last_name__icontains=search_query) |
+                Q(email__icontains=search_query)
+            )
+        
+        # Apply sorting
+        valid_sorts = ['total_sales', '-total_sales', 'username', '-username', 'date_joined', '-date_joined']
+        if sort_by in valid_sorts:
+            vendors = vendors.order_by(sort_by)
+        else:
+            vendors = vendors.order_by('-total_sales')
+        
+        # Paginate
+        paginator = Paginator(vendors, limit)
+        page_obj = paginator.get_page(page)
+        
+        # Serialize vendor data
+        vendors_data = []
+        for vendor in page_obj:
+            # Get vendor statistics
+            vendor_purchases = Purchase.objects.filter(
+                product__user=vendor,
+                status='completed'
+            )
+            
+            total_sales = vendor_purchases.count()
+            total_products = Post.objects.filter(user=vendor).count()
+            in_stock_products = Post.objects.filter(user=vendor, inventory__gt=0).count()
+            
+            # Calculate monthly stats
+            current_month = timezone.now().month
+            current_year = timezone.now().year
+            monthly_sales = vendor_purchases.filter(
+                pickup_confirmed_at__month=current_month,
+                pickup_confirmed_at__year=current_year
+            ).count()
+            
+            vendors_data.append({
+                'id': vendor.id,
+                'username': vendor.username,
+                'first_name': vendor.first_name,
+                'last_name': vendor.last_name,
+                'email': vendor.email,
+                'phone_number': vendor.phone_number,
+                'profile_picture': vendor.profile_picture.url if vendor.profile_picture else None,
+                'date_joined': vendor.date_joined.isoformat(),
+                'statistics': {
+                    'total_sales': total_sales,
+                    'total_revenue': float(vendor.total_sales),
+                    'total_products': total_products,
+                    'in_stock_products': in_stock_products,
+                    'monthly_sales': monthly_sales
+                }
+            })
+        
+        return JsonResponse({
+            'success': True,
+            'data': {
+                'vendors': vendors_data,
+                'pagination': {
+                    'current_page': page_obj.number,
+                    'total_pages': paginator.num_pages,
+                    'total_vendors': paginator.count,
+                    'has_next': page_obj.has_next(),
+                    'has_previous': page_obj.has_previous()
+                }
+            }
+        })
+        
+    except Exception as e:
+        import traceback
+        print('Error in get_all_vendors_api:', traceback.format_exc())
+        return JsonResponse({'error': f'Error processing request: {str(e)}'}, status=500)
+
+@csrf_exempt
+@require_http_methods(['GET'])
+def get_vendor_profile_api(request, vendor_id):
+    """API endpoint for agaseke agents to get detailed vendor profile"""
+    # Get user from token (for API authentication)
+    user = get_token_user(request)
+    if not user:
+        return JsonResponse({
+            'error': 'Authentication required'
+        }, status=401)
+    
+    if not user.is_agaseke():
+        return JsonResponse({'error': 'Access denied. agaseke role required.'}, status=403)
+    
+    try:
+        # Get the vendor
+        vendor = User.objects.get(id=vendor_id, is_vendor_role=True)
+        
+        # Get all purchases for this vendor
+        purchases = Purchase.objects.filter(
+            product__user=vendor,
+            status='completed'
+        ).select_related('product', 'buyer', 'agaseke_user')
+        
+        # Calculate vendor statistics
+        total_sales = purchases.count()
+        total_revenue = purchases.aggregate(
+            total=Sum('vendor_payment_amount')
+        )['total'] or 0
+        
+        # Monthly statistics
+        current_month = timezone.now().month
+        current_year = timezone.now().year
+        monthly_purchases = purchases.filter(
+            pickup_confirmed_at__month=current_month,
+            pickup_confirmed_at__year=current_year
+        )
+        monthly_revenue = monthly_purchases.aggregate(
+            total=Sum('vendor_payment_amount')
+        )['total'] or 0
+        monthly_sales = monthly_purchases.count()
+        
+        # Product statistics
+        all_products = Post.objects.filter(user=vendor)
+        total_products = all_products.count()
+        in_stock_products = all_products.filter(inventory__gt=0).count()
+        out_of_stock_products = all_products.filter(inventory=0).count()
+        
+        # Product-wise breakdown (top 10 products)
+        product_stats = list(purchases.values('product__id', 'product__title').annotate(
+            total_sales=Count('id'),
+            total_revenue=Sum('vendor_payment_amount'),
+            total_quantity=Sum('quantity')
+        ).order_by('-total_revenue')[:10])
+        
+        # agaseke commission from this vendor
+        agaseke_commission = purchases.aggregate(
+            total=Sum('agaseke_commission_amount')
+        )['total'] or 0
+        
+        # Monthly agaseke commission
+        monthly_agaseke_commission = monthly_purchases.aggregate(
+            total=Sum('agaseke_commission_amount')
+        )['total'] or 0
+        
+        # Recent transactions (last 20)
+        recent_transactions = []
+        for purchase in purchases.order_by('-pickup_confirmed_at')[:20]:
+            recent_transactions.append({
+                'purchase_id': purchase.id,
+                'order_id': purchase.order_id,
+                'product_title': purchase.product.title,
+                'buyer_username': purchase.buyer.username,
+                'quantity': purchase.quantity,
+                'vendor_payment': str(purchase.vendor_payment_amount),
+                'agaseke_commission': str(purchase.agaseke_commission_amount),
+                'pickup_confirmed_at': purchase.pickup_confirmed_at.isoformat() if purchase.pickup_confirmed_at else None,
+                'created_at': purchase.created_at.isoformat()
+            })
+        
+        # Weekly sales trend (last 7 days)
+        from datetime import timedelta
+        today = timezone.now().date()
+        weekly_trend = []
+        for i in range(6, -1, -1):
+            day = today - timedelta(days=i)
+            day_purchases = purchases.filter(
+                pickup_confirmed_at__date=day
+            )
+            weekly_trend.append({
+                'date': day.isoformat(),
+                'sales': day_purchases.count(),
+                'revenue': float(day_purchases.aggregate(total=Sum('vendor_payment_amount'))['total'] or 0)
+            })
+        
+        # Get vendor's products (limited to 10 recent)
+        from authentication.serializers_helpers import serialize_post
+        recent_products = all_products.order_by('-created_at')[:10]
+        products_data = [serialize_post(product, user) for product in recent_products]
+        
+        # Build response
+        data = {
+            'success': True,
+            'data': {
+                'vendor': {
+                    'id': vendor.id,
+                    'username': vendor.username,
+                    'first_name': vendor.first_name,
+                    'last_name': vendor.last_name,
+                    'email': vendor.email,
+                    'phone_number': vendor.phone_number,
+                    'profile_picture': vendor.profile_picture.url if vendor.profile_picture else None,
+                    'date_joined': vendor.date_joined.isoformat(),
+                    'is_vendor': True
+                },
+                'statistics': {
+                    'total_sales': total_sales,
+                    'total_revenue': str(total_revenue),
+                    'monthly_sales': monthly_sales,
+                    'monthly_revenue': str(monthly_revenue),
+                    'total_products': total_products,
+                    'in_stock_products': in_stock_products,
+                    'out_of_stock_products': out_of_stock_products,
+                    'agaseke_commission': str(agaseke_commission),
+                    'monthly_agaseke_commission': str(monthly_agaseke_commission)
+                },
+                'top_products': product_stats,
+                'recent_transactions': recent_transactions,
+                'weekly_trend': weekly_trend,
+                'recent_products': products_data
+            }
+        }
+        
+        return JsonResponse(data)
+        
+    except User.DoesNotExist:
+        return JsonResponse({'error': 'Vendor not found'}, status=404)
+    except Exception as e:
+        import traceback
+        print('Error in get_vendor_profile_api:', traceback.format_exc())
+        return JsonResponse({'error': f'Error processing request: {str(e)}'}, status=500)

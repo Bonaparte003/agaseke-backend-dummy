@@ -54,6 +54,8 @@ urlpatterns = [
     path('api/verify-otp/', api_views.verify_otp_view, name='api_verify_otp'),
     path('api/complete-purchase/', api_views.complete_purchase_pickup, name='api_complete_purchase'),
     path('api/complete-purchases-bulk/', api_views.complete_purchases_bulk, name='api_complete_purchases_bulk'),
+    path('api/vendors/', api_views.get_all_vendors_api, name='api_get_all_vendors'),
+    path('api/vendors/<int:vendor_id>/', api_views.get_vendor_profile_api, name='api_get_vendor_profile'),
     path('api/vendor-statistics/<int:vendor_id>/', api_views.get_vendor_statistics_modal, name='api_vendor_statistics_modal'),
 ]
 
