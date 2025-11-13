@@ -313,6 +313,291 @@ def purchase_product_api(request, post_id):
             'errors': {'server': [str(e)]}
         }, status=500)
 
+@csrf_exempt
+@require_http_methods(['POST'])
+def bulk_purchase_api(request):
+    """
+    API endpoint for bulk purchase - purchase multiple products at once
+    
+    Can work in two modes:
+    1. Purchase from cart (set "from_cart": true)
+    2. Purchase specific items (provide "items" array)
+    
+    Request body:
+    {
+        "from_cart": true/false,
+        "items": [  // Only needed if from_cart is false
+            {"product_id": 1, "quantity": 2},
+            {"product_id": 3, "quantity": 1}
+        ],
+        "delivery_method": "pickup" or "delivery",
+        "payment_method": "momo" or "credit",
+        "delivery_address": "123 Main St" (required if delivery_method is "delivery"),
+        "delivery_latitude": 12.345,
+        "delivery_longitude": 67.890,
+        "clear_cart": true/false  // Clear cart after purchase (default: true if from_cart)
+    }
+    """
+    try:
+        from django.db import transaction
+        from decimal import Decimal
+        import json
+        
+        # Get user from token
+        user = get_token_user(request)
+        if not user:
+            return JsonResponse({
+                'success': False,
+                'message': 'Authentication required',
+                'errors': {'auth': ['Please provide valid authentication credentials']}
+            }, status=401)
+        
+        # Parse request data
+        try:
+            if request.content_type == 'application/json':
+                data = json.loads(request.body)
+            else:
+                data = request.POST.dict()
+        except json.JSONDecodeError:
+            return JsonResponse({
+                'success': False,
+                'message': 'Invalid JSON data',
+                'errors': {'json': ['Request body contains invalid JSON']}
+            }, status=400)
+        
+        from_cart = data.get('from_cart', False)
+        delivery_method = data.get('delivery_method', 'pickup')
+        payment_method = data.get('payment_method', 'momo')
+        delivery_address = data.get('delivery_address', '')
+        delivery_latitude = data.get('delivery_latitude')
+        delivery_longitude = data.get('delivery_longitude')
+        clear_cart = data.get('clear_cart', from_cart)  # Default to True if purchasing from cart
+        
+        # Validate delivery method
+        if delivery_method not in ['pickup', 'delivery']:
+            return JsonResponse({
+                'success': False,
+                'message': 'Invalid delivery method',
+                'errors': {'delivery_method': ['Must be "pickup" or "delivery"']}
+            }, status=400)
+        
+        # Validate delivery address for delivery method
+        if delivery_method == 'delivery' and not delivery_address:
+            return JsonResponse({
+                'success': False,
+                'message': 'Delivery address required',
+                'errors': {'delivery_address': ['Please provide a delivery address for home delivery']}
+            }, status=400)
+        
+        # Get items to purchase
+        items_to_purchase = []
+        
+        if from_cart:
+            # Purchase from cart
+            from products.models import Cart, CartItem
+            try:
+                cart = Cart.objects.get(user=user)
+                cart_items = cart.items.select_related('product').all()
+                
+                if not cart_items.exists():
+                    return JsonResponse({
+                        'success': False,
+                        'message': 'Cart is empty',
+                        'errors': {'cart': ['Your cart is empty']}
+                    }, status=400)
+                
+                for cart_item in cart_items:
+                    items_to_purchase.append({
+                        'product': cart_item.product,
+                        'quantity': cart_item.quantity
+                    })
+                    
+            except Cart.DoesNotExist:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Cart not found',
+                    'errors': {'cart': ['Cart does not exist']}
+                }, status=404)
+        else:
+            # Purchase specific items
+            items_data = data.get('items', [])
+            
+            if not items_data:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'No items provided',
+                    'errors': {'items': ['Please provide items to purchase']}
+                }, status=400)
+            
+            # Validate and fetch products
+            for item_data in items_data:
+                product_id = item_data.get('product_id')
+                quantity = item_data.get('quantity', 1)
+                
+                if not product_id:
+                    return JsonResponse({
+                        'success': False,
+                        'message': 'Product ID required',
+                        'errors': {'items': ['Each item must have a product_id']}
+                    }, status=400)
+                
+                try:
+                    quantity = int(quantity)
+                    if quantity <= 0:
+                        raise ValueError("Quantity must be positive")
+                except (ValueError, TypeError):
+                    return JsonResponse({
+                        'success': False,
+                        'message': 'Invalid quantity',
+                        'errors': {'items': [f'Invalid quantity for product {product_id}']}
+                    }, status=400)
+                
+                try:
+                    product = Post.objects.get(id=product_id)
+                    items_to_purchase.append({
+                        'product': product,
+                        'quantity': quantity
+                    })
+                except Post.DoesNotExist:
+                    return JsonResponse({
+                        'success': False,
+                        'message': 'Product not found',
+                        'errors': {'items': [f'Product with ID {product_id} not found']}
+                    }, status=404)
+        
+        # Validation checks before creating purchases
+        validation_errors = []
+        
+        for item in items_to_purchase:
+            product = item['product']
+            quantity = item['quantity']
+            
+            # Check if buying own product
+            if product.user == user:
+                validation_errors.append(f'Cannot purchase your own product: {product.title}')
+            
+            # Check if product has valid price
+            if product.price is None:
+                validation_errors.append(f'{product.title} does not have a valid price')
+            
+            # Check inventory
+            if product.inventory < quantity:
+                if product.inventory == 0:
+                    validation_errors.append(f'{product.title} is out of stock')
+                else:
+                    validation_errors.append(f'{product.title}: only {product.inventory} available, requested {quantity}')
+        
+        if validation_errors:
+            return JsonResponse({
+                'success': False,
+                'message': 'Validation failed',
+                'errors': {'items': validation_errors}
+            }, status=400)
+        
+        # Use database transaction for atomic operation
+        created_purchases = []
+        total_amount = Decimal('0.00')
+        delivery_fee = Decimal('5.00') if delivery_method == 'delivery' else Decimal('0.00')
+        initial_status = 'awaiting_delivery' if delivery_method == 'delivery' else 'awaiting_pickup'
+        
+        with transaction.atomic():
+            # Create purchases for each item
+            for item in items_to_purchase:
+                product = item['product']
+                quantity = item['quantity']
+                
+                # Refresh product to get latest inventory (prevent race conditions)
+                product.refresh_from_db()
+                
+                # Double-check inventory
+                if product.inventory < quantity:
+                    raise ValueError(f'Insufficient inventory for {product.title}')
+                
+                # Calculate price for this item
+                item_total = product.price * quantity
+                total_amount += item_total
+                
+                # Create purchase
+                purchase = Purchase(
+                    buyer=user,
+                    product=product,
+                    quantity=quantity,
+                    purchase_price=item_total,
+                    delivery_method=delivery_method,
+                    payment_method=payment_method,
+                    delivery_fee=delivery_fee if len(items_to_purchase) == 1 or item == items_to_purchase[-1] else Decimal('0.00'),  # Add delivery fee to last item only
+                    delivery_address=delivery_address,
+                    status=initial_status
+                )
+                
+                # Add location coordinates if provided
+                if delivery_latitude and delivery_longitude:
+                    try:
+                        purchase.delivery_latitude = float(delivery_latitude)
+                        purchase.delivery_longitude = float(delivery_longitude)
+                    except (ValueError, TypeError):
+                        pass
+                
+                purchase.save()
+                created_purchases.append(purchase)
+                
+                # Update product inventory and stats
+                product.inventory -= quantity
+                product.total_purchases += 1
+                product.save()
+            
+            # Clear cart if requested
+            if clear_cart and from_cart:
+                cart.clear()
+        
+        # Update user's QR code after all purchases
+        update_user_qr_code(user)
+        
+        # Prepare response data
+        purchases_data = [serialize_purchase(purchase) for purchase in created_purchases]
+        
+        # Calculate summary
+        total_with_delivery = total_amount + delivery_fee
+        
+        return JsonResponse({
+            'success': True,
+            'message': f'Successfully purchased {len(created_purchases)} item(s). Total: RWF {float(total_with_delivery):,.2f}',
+            'data': {
+                'purchases': purchases_data,
+                'summary': {
+                    'total_items': len(created_purchases),
+                    'total_quantity': sum(p.quantity for p in created_purchases),
+                    'subtotal': float(total_amount),
+                    'delivery_fee': float(delivery_fee),
+                    'total': float(total_with_delivery),
+                    'delivery_method': delivery_method,
+                    'payment_method': payment_method,
+                    'cart_cleared': clear_cart and from_cart
+                }
+            }
+        }, status=201)
+        
+    except ValueError as e:
+        # Inventory check failed during transaction
+        return JsonResponse({
+            'success': False,
+            'message': 'Purchase failed',
+            'errors': {'transaction': [str(e)]}
+        }, status=400)
+    except Exception as e:
+        import logging
+        import traceback
+        logger = logging.getLogger(__name__)
+        logger.error(f"Bulk purchase error: {str(e)}")
+        logger.error(traceback.format_exc())
+        
+        return JsonResponse({
+            'success': False,
+            'message': 'Error processing purchase',
+            'errors': {'server': [str(e)]}
+        }, status=500)
+
+
 @login_required
 def create_product(request):
     """Legacy HTML view - kept for backward compatibility"""

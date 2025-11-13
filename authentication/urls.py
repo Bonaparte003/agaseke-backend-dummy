@@ -71,7 +71,8 @@ api_endpoints = [
     path('v1/posts/', products_views.create_product_api, name='create_product_api'),  # POST - Create product
     path('v1/posts/<int:post_id>/edit/', products_views.edit_product_api, name='edit_product_api'),  # PUT/PATCH - Edit product
     path('v1/posts/<int:post_id>/delete/', products_views.delete_product_api, name='delete_product_api'),  # DELETE - Delete product
-    path('v1/posts/<int:post_id>/purchase/', products_views.purchase_product_api, name='purchase_product_api'),
+    path('v1/posts/<int:post_id>/purchase/', products_views.purchase_product_api, name='purchase_product_api'),  # POST - Single purchase (legacy)
+    path('v1/purchases/bulk/', products_views.bulk_purchase_api, name='bulk_purchase_api'),  # POST - Bulk purchase
     
     # User interactions
     path('v1/bookmark/<int:post_id>/', posts_views.bookmark_toggle_api, name='bookmark_toggle_api'),
