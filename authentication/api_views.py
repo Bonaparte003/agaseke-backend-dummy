@@ -6,6 +6,7 @@ from django.contrib.auth.decorators import login_required
 from django.utils import timezone
 from users.models import User
 from products.models import Purchase
+from posts.models import Post
 from .qr_utils import decode_qr_data, get_user_purchases_from_qr
 from .otp_utils import create_otp, verify_otp as verify_otp_util
 from .utils import get_token_user
