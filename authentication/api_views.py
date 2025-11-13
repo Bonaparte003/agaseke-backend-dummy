@@ -1,6 +1,6 @@
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_POST
+from django.views.decorators.http import require_POST, require_http_methods
 from django.contrib.auth import authenticate
 from django.contrib.auth.decorators import login_required
 from django.utils import timezone
@@ -8,15 +8,24 @@ from users.models import User
 from products.models import Purchase
 from .qr_utils import decode_qr_data, get_user_purchases_from_qr
 from .otp_utils import create_otp, verify_otp as verify_otp_util
+from .utils import get_token_user
 import json
 from django.db.models import Sum, Count, Avg
 from decimal import Decimal
 
-@login_required
-@require_POST
+@csrf_exempt
+@require_http_methods(['POST'])
 def get_purchases_by_qr(request):
     """API endpoint to get purchases from a QR code"""
-    if not request.user.is_agaseke():
+    # Get user from token (for API authentication)
+    user = get_token_user(request)
+    if not user:
+        return JsonResponse({
+            'error': 'Authentication required',
+            'purchases': []
+        }, status=401)
+    
+    if not user.is_agaseke():
         return JsonResponse({'error': 'Access denied. agaseke role required.', 'purchases': []}, status=403)
     
     try:
@@ -79,11 +88,18 @@ def get_purchases_by_qr(request):
         print('Error in get_purchases_by_qr:', traceback.format_exc())
         return JsonResponse({'error': f'Error processing request: {str(e)}', 'purchases': []}, status=500)
 
-@login_required
-@require_POST
+@csrf_exempt
+@require_http_methods(['POST'])
 def verify_buyer_credentials(request):
     """API endpoint to verify buyer credentials"""
-    if not request.user.is_agaseke():
+    # Get user from token (for API authentication)
+    user = get_token_user(request)
+    if not user:
+        return JsonResponse({
+            'error': 'Authentication required'
+        }, status=401)
+    
+    if not user.is_agaseke():
         return JsonResponse({'error': 'Access denied. agaseke role required.'}, status=403)
     
     try:
@@ -116,11 +132,18 @@ def verify_buyer_credentials(request):
     except Exception as e:
         return JsonResponse({'error': f'Error processing request: {str(e)}'}, status=500)
 
-@login_required
-@require_POST
+@csrf_exempt
+@require_http_methods(['POST'])
 def send_otp(request):
     """API endpoint to send OTP for purchase verification"""
-    if not request.user.is_agaseke():
+    # Get user from token (for API authentication)
+    user = get_token_user(request)
+    if not user:
+        return JsonResponse({
+            'error': 'Authentication required'
+        }, status=401)
+    
+    if not user.is_agaseke():
         return JsonResponse({'error': 'Access denied. agaseke role required.'}, status=403)
     
     try:
@@ -151,11 +174,18 @@ def send_otp(request):
     except Exception as e:
         return JsonResponse({'error': f'Error processing request: {str(e)}'}, status=500)
 
-@login_required
-@require_POST
+@csrf_exempt
+@require_http_methods(['POST'])
 def verify_otp_view(request):
     """API endpoint to verify OTP for purchase confirmation"""
-    if not request.user.is_agaseke():
+    # Get user from token (for API authentication)
+    user = get_token_user(request)
+    if not user:
+        return JsonResponse({
+            'error': 'Authentication required'
+        }, status=401)
+    
+    if not user.is_agaseke():
         return JsonResponse({'error': 'Access denied. agaseke role required.'}, status=403)
     
     try:
@@ -186,11 +216,18 @@ def verify_otp_view(request):
     except Exception as e:
         return JsonResponse({'error': f'Error processing request: {str(e)}'}, status=500)
 
-@login_required
-@require_POST
+@csrf_exempt
+@require_http_methods(['POST'])
 def complete_purchase_pickup(request):
     """API endpoint to complete purchase pickup after OTP verification"""
-    if not request.user.is_agaseke():
+    # Get user from token (for API authentication)
+    agaseke_user = get_token_user(request)
+    if not agaseke_user:
+        return JsonResponse({
+            'error': 'Authentication required'
+        }, status=401)
+    
+    if not agaseke_user.is_agaseke():
         return JsonResponse({'error': 'Access denied. agaseke role required.'}, status=403)
     
     try:
@@ -220,7 +257,7 @@ def complete_purchase_pickup(request):
         
         # Complete the purchase
         purchase.status = 'completed'
-        purchase.agaseke_user = request.user
+        purchase.agaseke_user = agaseke_user
         purchase.pickup_confirmed_at = timezone.now()
         purchase.save()
         

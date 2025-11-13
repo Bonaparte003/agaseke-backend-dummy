@@ -791,7 +791,7 @@ def create_product_api(request):
                     'success': False,
                     'message': 'Invalid original price',
                     'errors': {'original_price': ['Original price must be a valid number']}
-                }, status=400)
+            }, status=400)
         
         # Create product
         post = Post(
