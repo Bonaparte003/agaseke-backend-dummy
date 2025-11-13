@@ -1082,6 +1082,168 @@ def delete_product_api(request, post_id):
             'errors': {'server': [str(e)]}
         }, status=500)
 
+@csrf_exempt
+@require_http_methods(['GET'])
+def my_products_api(request):
+    """
+    API endpoint to get all products created by the vendor with management info
+    
+    Query parameters:
+    - page: Page number (default: 1)
+    - limit: Items per page (default: 50, max: 100)
+    - category: Filter by category slug or ID
+    - in_stock: Filter by stock status (true/false)
+    - is_great_deal: Filter by great deal status (true/false)
+    - search: Search in title and description
+    - sort: Sort field (created_at, -created_at, price, -price, title, inventory)
+    """
+    try:
+        # Get user from token
+        user = get_token_user(request)
+        if not user:
+            return JsonResponse({
+                'success': False,
+                'message': 'Authentication required',
+                'errors': {'auth': ['Please provide valid authentication credentials']}
+            }, status=401)
+        
+        # Check if user is a vendor
+        if not user.is_vendor_role:
+            return JsonResponse({
+                'success': False,
+                'message': 'Vendor role required',
+                'errors': {'role': ['You need to be a vendor to access this endpoint']}
+            }, status=403)
+        
+        # Get query parameters
+        page = int(request.GET.get('page', 1))
+        limit = min(int(request.GET.get('limit', 50)), 100)  # Max 100 per page
+        category_filter = request.GET.get('category')
+        in_stock_filter = request.GET.get('in_stock')
+        is_great_deal_filter = request.GET.get('is_great_deal')
+        search_query = request.GET.get('search', '').strip()
+        sort_by = request.GET.get('sort', '-created_at')
+        
+        # Start with user's products
+        products = Post.objects.filter(user=user).select_related('category')
+        
+        # Apply filters
+        if category_filter:
+            # Try by ID first, then by slug
+            try:
+                category_id = int(category_filter)
+                products = products.filter(category_id=category_id)
+            except ValueError:
+                products = products.filter(category__slug=category_filter)
+        
+        if in_stock_filter is not None:
+            if in_stock_filter.lower() == 'true':
+                products = products.filter(inventory__gt=0)
+            elif in_stock_filter.lower() == 'false':
+                products = products.filter(inventory=0)
+        
+        if is_great_deal_filter is not None:
+            if is_great_deal_filter.lower() == 'true':
+                products = products.filter(is_great_deal=True)
+            elif is_great_deal_filter.lower() == 'false':
+                products = products.filter(is_great_deal=False)
+        
+        if search_query:
+            from django.db.models import Q
+            products = products.filter(
+                Q(title__icontains=search_query) | 
+                Q(description__icontains=search_query)
+            )
+        
+        # Apply sorting
+        valid_sort_fields = ['created_at', '-created_at', 'price', '-price', 'title', '-title', 'inventory', '-inventory']
+        if sort_by in valid_sort_fields:
+            products = products.order_by(sort_by)
+        else:
+            products = products.order_by('-created_at')
+        
+        # Get total count before pagination
+        total_count = products.count()
+        
+        # Calculate pagination
+        start = (page - 1) * limit
+        end = start + limit
+        paginated_products = products[start:end]
+        
+        # Serialize products with management info
+        products_data = []
+        for product in paginated_products:
+            # Check if product can be edited or deleted
+            has_purchases = Purchase.objects.filter(product=product).exists()
+            has_bookmarks = Bookmark.objects.filter(post=product).exists()
+            
+            can_edit = not (has_purchases or has_bookmarks)
+            can_delete = not has_purchases  # Can only delete if never purchased
+            
+            product_data = serialize_post(product, user)
+            
+            # Add management metadata
+            product_data['management'] = {
+                'can_edit': can_edit,
+                'can_delete': can_delete,
+                'has_purchases': has_purchases,
+                'has_bookmarks': has_bookmarks,
+                'edit_restrictions': [] if can_edit else ['Product has been purchased or bookmarked'],
+                'delete_restrictions': [] if can_delete else ['Product has purchase history']
+            }
+            
+            products_data.append(product_data)
+        
+        # Calculate pagination info
+        total_pages = (total_count + limit - 1) // limit  # Ceiling division
+        has_next = page < total_pages
+        has_previous = page > 1
+        
+        return JsonResponse({
+            'success': True,
+            'message': f'Retrieved {len(products_data)} product(s)',
+            'data': {
+                'products': products_data,
+                'pagination': {
+                    'current_page': page,
+                    'per_page': limit,
+                    'total_items': total_count,
+                    'total_pages': total_pages,
+                    'has_next': has_next,
+                    'has_previous': has_previous,
+                    'next_page': page + 1 if has_next else None,
+                    'previous_page': page - 1 if has_previous else None
+                },
+                'filters_applied': {
+                    'category': category_filter,
+                    'in_stock': in_stock_filter,
+                    'is_great_deal': is_great_deal_filter,
+                    'search': search_query,
+                    'sort': sort_by
+                }
+            }
+        }, status=200)
+        
+    except ValueError as e:
+        return JsonResponse({
+            'success': False,
+            'message': 'Invalid parameter',
+            'errors': {'params': [str(e)]}
+        }, status=400)
+    except Exception as e:
+        import logging
+        import traceback
+        logger = logging.getLogger(__name__)
+        logger.error(f"My products API error: {str(e)}")
+        logger.error(traceback.format_exc())
+        
+        return JsonResponse({
+            'success': False,
+            'message': 'Error retrieving products',
+            'errors': {'server': [str(e)]}
+        }, status=500)
+
+
 @login_required
 def edit_product(request, product_id):
     # Check if user has vendor role

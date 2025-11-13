@@ -85,6 +85,7 @@ api_endpoints = [
     path('v1/qr-code/', views.user_qr_code_api, name='user_qr_code_api'),  # GET/POST - Get QR code in base64
     path('v1/become-vendor/', users_views.become_vendor_api, name='become_vendor_api'),
     path('v1/vendor-dashboard/', users_views.vendor_dashboard_api, name='vendor_dashboard_api'),
+    path('v1/my-products/', products_views.my_products_api, name='my_products_api'),  # GET - Vendor's products with management info
     path('v1/agaseke-dashboard/', views.agaseke_dashboard_api, name='agaseke_dashboard_api'),
     
     # Categories
