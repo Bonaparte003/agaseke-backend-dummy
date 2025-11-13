@@ -288,6 +288,166 @@ def complete_purchase_pickup(request):
         return JsonResponse({'error': f'Error processing request: {str(e)}'}, status=500)
 
 @csrf_exempt
+@require_http_methods(['POST'])
+def complete_purchases_bulk(request):
+    """API endpoint to complete multiple purchases at once after OTP verification"""
+    # Get user from token (for API authentication)
+    agaseke_user = get_token_user(request)
+    if not agaseke_user:
+        return JsonResponse({
+            'error': 'Authentication required',
+            'completed': [],
+            'failed': []
+        }, status=401)
+    
+    if not agaseke_user.is_agaseke():
+        return JsonResponse({
+            'error': 'Access denied. agaseke role required.',
+            'completed': [],
+            'failed': []
+        }, status=403)
+    
+    try:
+        from django.db import transaction
+        from decimal import Decimal
+        
+        data = json.loads(request.body)
+        purchase_ids = data.get('purchase_ids', [])
+        
+        if not purchase_ids:
+            return JsonResponse({
+                'error': 'No purchase IDs provided',
+                'completed': [],
+                'failed': []
+            }, status=400)
+        
+        if not isinstance(purchase_ids, list):
+            return JsonResponse({
+                'error': 'purchase_ids must be an array',
+                'completed': [],
+                'failed': []
+            }, status=400)
+        
+        # Fetch all purchases
+        purchases = Purchase.objects.filter(id__in=purchase_ids).select_related('buyer', 'product', 'product__user')
+        
+        if not purchases.exists():
+            return JsonResponse({
+                'error': 'No valid purchases found',
+                'completed': [],
+                'failed': []
+            }, status=404)
+        
+        # Validate all purchases belong to the same buyer
+        buyer_ids = set(p.buyer_id for p in purchases)
+        if len(buyer_ids) > 1:
+            return JsonResponse({
+                'error': 'All purchases must belong to the same buyer',
+                'completed': [],
+                'failed': []
+            }, status=400)
+        
+        # Validate all purchases are in valid status
+        completed_purchases = []
+        failed_purchases = []
+        total_vendor_payment = Decimal('0.00')
+        total_agaseke_commission = Decimal('0.00')
+        
+        # Use atomic transaction to ensure all-or-nothing completion
+        with transaction.atomic():
+            for purchase in purchases:
+                try:
+                    # Check if purchase is awaiting pickup or delivery
+                    if purchase.status not in ['awaiting_pickup', 'awaiting_delivery']:
+                        failed_purchases.append({
+                            'purchase_id': purchase.id,
+                            'order_id': purchase.order_id,
+                            'error': f'Invalid status: {purchase.status}',
+                            'product': purchase.product.title
+                        })
+                        continue
+                    
+                    # Complete the purchase
+                    purchase.status = 'completed'
+                    purchase.agaseke_user = agaseke_user
+                    purchase.pickup_confirmed_at = timezone.now()
+                    purchase.save()
+                    
+                    # Update vendor stats
+                    vendor = purchase.product.user
+                    vendor.total_sales += purchase.vendor_payment_amount
+                    vendor.save()
+                    
+                    # Track totals
+                    total_vendor_payment += purchase.vendor_payment_amount
+                    total_agaseke_commission += purchase.agaseke_commission_amount
+                    
+                    completed_purchases.append({
+                        'purchase_id': purchase.id,
+                        'order_id': purchase.order_id,
+                        'product': purchase.product.title,
+                        'vendor_payment': str(purchase.vendor_payment_amount),
+                        'agaseke_commission': str(purchase.agaseke_commission_amount)
+                    })
+                    
+                except Exception as e:
+                    failed_purchases.append({
+                        'purchase_id': purchase.id,
+                        'order_id': getattr(purchase, 'order_id', 'N/A'),
+                        'error': str(e),
+                        'product': getattr(purchase.product, 'title', 'Unknown')
+                    })
+            
+            # If at least one purchase was completed, update buyer stats
+            if completed_purchases:
+                buyer = purchases.first().buyer
+                total_buyer_spent = sum(p.purchase_price * p.quantity for p in purchases if p.status == 'completed')
+                buyer.total_purchases += total_buyer_spent
+                buyer.save()
+        
+        # Regenerate buyer's QR code to remove completed purchases
+        if completed_purchases:
+            try:
+                from .qr_utils import update_user_qr_code
+                buyer = purchases.first().buyer
+                update_user_qr_code(buyer)
+            except Exception as e:
+                print(f"Failed to update QR code for buyer: {str(e)}")
+        
+        # Prepare response
+        response_data = {
+            'success': len(completed_purchases) > 0,
+            'message': f'Completed {len(completed_purchases)} out of {len(purchase_ids)} purchases',
+            'summary': {
+                'total_completed': len(completed_purchases),
+                'total_failed': len(failed_purchases),
+                'total_vendor_payment': str(total_vendor_payment),
+                'total_agaseke_commission': str(total_agaseke_commission)
+            },
+            'completed': completed_purchases,
+            'failed': failed_purchases
+        }
+        
+        # Determine HTTP status code
+        if len(completed_purchases) == len(purchase_ids):
+            status_code = 200  # All succeeded
+        elif len(completed_purchases) > 0:
+            status_code = 207  # Partial success (Multi-Status)
+        else:
+            status_code = 400  # All failed
+        
+        return JsonResponse(response_data, status=status_code)
+        
+    except Exception as e:
+        import traceback
+        print('Error in complete_purchases_bulk:', traceback.format_exc())
+        return JsonResponse({
+            'error': f'Error processing request: {str(e)}',
+            'completed': [],
+            'failed': []
+        }, status=500)
+
+@csrf_exempt
 def get_vendor_statistics_modal(request, vendor_id):
     """API endpoint to get vendor statistics for modal popup"""
     if request.method != 'GET':
