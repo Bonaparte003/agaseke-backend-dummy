@@ -837,8 +837,18 @@ def create_product_api(request):
 @csrf_exempt
 @require_http_methods(['PUT', 'PATCH'])
 def edit_product_api(request, post_id):
-    """API endpoint to edit/update a product"""
+    """
+    API endpoint to edit/update a product
+    
+    - PUT: Full update (use multipart/form-data if updating images)
+    - PATCH: Partial update (supports both JSON and multipart/form-data)
+    
+    For text-only updates, you can use PATCH with JSON.
+    For image updates, use multipart/form-data.
+    """
     try:
+        import json
+        
         # Get user from token
         user = get_token_user(request)
         if not user:
@@ -877,24 +887,55 @@ def edit_product_api(request, post_id):
                 'errors': {'product': ['This product cannot be edited as it has been purchased or bookmarked by customers']}
             }, status=403)
         
-        # Parse request data (support form-data for file uploads)
-        if request.content_type and 'application/json' in request.content_type:
-            return JsonResponse({
-                'success': False,
-                'message': 'Use multipart/form-data for file uploads',
-                'errors': {'content_type': ['Please use multipart/form-data for product updates with images']}
-            }, status=400)
+        # Determine if this is a file upload or JSON request
+        is_json_request = request.content_type and 'application/json' in request.content_type
+        is_multipart = request.content_type and 'multipart/form-data' in request.content_type
         
-        # Get form data
-        title = request.POST.get('title', post.title)
-        description = request.POST.get('description', post.description)
-        price = request.POST.get('price', post.price)
-        category_input = request.POST.get('category')
-        inventory = request.POST.get('inventory', post.inventory)
-        main_image = request.FILES.get('main_image')  # Optional for updates
+        # Parse request data based on content type
+        if is_json_request:
+            # JSON request - for text-only updates (PATCH)
+            try:
+                data = json.loads(request.body)
+            except json.JSONDecodeError:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Invalid JSON data',
+                    'errors': {'json': ['Request body contains invalid JSON']}
+                }, status=400)
+            
+            # Extract fields from JSON (only update if provided)
+            title = data.get('title')
+            description = data.get('description')
+            price = data.get('price')
+            category_input = data.get('category')
+            inventory = data.get('inventory')
+            is_great_deal_input = data.get('is_great_deal')
+            original_price_input = data.get('original_price')
+            main_image = None
+            auxiliary_images = []
+            
+        else:
+            # Form data (for file uploads or PUT requests)
+            title = request.POST.get('title')
+            description = request.POST.get('description')
+            price = request.POST.get('price')
+            category_input = request.POST.get('category')
+            inventory = request.POST.get('inventory')
+            is_great_deal_input = request.POST.get('is_great_deal')
+            original_price_input = request.POST.get('original_price')
+            main_image = request.FILES.get('main_image')  # Optional for updates
+            auxiliary_images = request.FILES.getlist('auxiliary_images')
         
-        # Validate price if provided
-        if price:
+        # Update title if provided
+        if title is not None:
+            post.title = title
+        
+        # Update description if provided
+        if description is not None:
+            post.description = description
+        
+        # Validate and update price if provided
+        if price is not None:
             try:
                 price_decimal = Decimal(str(price))
                 if price_decimal <= 0:
@@ -907,8 +948,8 @@ def edit_product_api(request, post_id):
                     'errors': {'price': ['Price must be a positive number']}
                 }, status=400)
         
-        # Validate inventory if provided
-        if inventory:
+        # Validate and update inventory if provided
+        if inventory is not None:
             try:
                 inventory_int = int(inventory)
                 if inventory_int < 0:
@@ -922,7 +963,7 @@ def edit_product_api(request, post_id):
                 }, status=400)
         
         # Validate and update category if provided
-        if category_input:
+        if category_input is not None:
             try:
                 # Try to get category by ID first, then by slug
                 try:
@@ -947,15 +988,19 @@ def edit_product_api(request, post_id):
                     'errors': {'category': [str(e)]}
                 }, status=400)
         
-        # Handle great_deal fields
-        is_great_deal_input = request.POST.get('is_great_deal')
+        # Handle great_deal toggle if provided
         if is_great_deal_input is not None:
-            post.is_great_deal = is_great_deal_input.lower() == 'true'
+            # Handle both boolean and string inputs
+            if isinstance(is_great_deal_input, bool):
+                post.is_great_deal = is_great_deal_input
+            else:
+                post.is_great_deal = str(is_great_deal_input).lower() in ['true', '1', 'yes']
         
-        original_price_input = request.POST.get('original_price')
-        if original_price_input:
+        # Handle original_price if provided
+        if original_price_input is not None:
             try:
                 original_price_decimal = Decimal(str(original_price_input))
+                # Only validate if is_great_deal is True
                 if post.is_great_deal and original_price_decimal <= post.price:
                     return JsonResponse({
                         'success': False,
@@ -970,13 +1015,9 @@ def edit_product_api(request, post_id):
                     'errors': {'original_price': ['Original price must be a valid number']}
                 }, status=400)
         
-        # If great_deal is disabled, clear original_price
-        if not post.is_great_deal:
+        # If great_deal is explicitly disabled, clear original_price
+        if is_great_deal_input is not None and not post.is_great_deal:
             post.original_price = None
-        
-        # Update fields
-        post.title = title
-        post.description = description
         
         # Update main image if provided
         if main_image:
@@ -985,7 +1026,6 @@ def edit_product_api(request, post_id):
         post.save()
         
         # Handle auxiliary images if provided
-        auxiliary_images = request.FILES.getlist('auxiliary_images')
         if auxiliary_images:
             # Remove old auxiliary images
             ProductImage.objects.filter(product=post).delete()
