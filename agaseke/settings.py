@@ -181,12 +181,12 @@ EMAIL_HOST = "smtp.gmail.com"
 EMAIL_PORT = 587
 EMAIL_USE_TLS = True
 EMAIL_HOST_USER = "hirwacedr12@gmail.com"
-EMAIL_HOST_PASSWORD = "ehkd uqwz vmzg pzeq"
+EMAIL_HOST_PASSWORD = ""
 DEFAULT_FROM_EMAIL = EMAIL_HOST_USER  # Using the same email account for authentication and sending
 # Use App Password, not regular password
 
 # Default from email (required for sending emails)
-DEFAULT_FROM_EMAIL = 'KoraQuest <noreply@koraquest.com>'
+DEFAULT_FROM_EMAIL = 'Agaseke <noreply@agaseke.com>'
 
 # QR Code Settings
 QR_CODE_UPDATE_INTERVAL = 600  # 10 minutes in seconds

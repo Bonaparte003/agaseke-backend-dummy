@@ -4,19 +4,18 @@ import io
 import json
 from datetime import datetime
 from decimal import Decimal
-import json
 
 from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib import messages
 from django.contrib.auth import login, authenticate, login as auth_login, logout as auth_logout
-from django.contrib.auth.forms import AuthenticationForm, UserCreationForm
-from django.contrib.auth.decorators import login_required
+from django.contrib.auth.forms import AuthenticationForm
 from django.http import HttpResponse, JsonResponse, Http404
-from django.views.decorators.csrf import ensure_csrf_cookie, csrf_protect
-from django.views.decorators.http import require_http_methods
+from django.views.decorators.csrf import ensure_csrf_cookie, csrf_protect, csrf_exempt
+from django.views.decorators.http import require_http_methods, require_POST
 from django.db.models import Q, Sum, Count, Avg
 from django.utils import timezone
 from django.core.paginator import Paginator
+from django.contrib.auth.decorators import login_required
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter, A4
@@ -26,100 +25,37 @@ from reportlab.lib.units import inch
 from reportlab.pdfgen import canvas
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 
-from users.forms import SignUpForm
-from posts.forms import ProductReviewForm
 from users.models import User
 from posts.models import Post, ProductReview, Bookmark
 from products.models import Purchase, ProductImage
 from .models import UserQRCode, OTPVerification
 from .qr_utils import update_user_qr_code, decode_qr_data, get_user_purchases_from_qr
-from .otp_utils import create_otp, verify_otp
+from .otp_utils import create_otp, verify_otp as verify_otp_util
 from .jwt_utils import get_tokens_for_user, get_user_from_token, refresh_access_token
-from django.views.decorators.csrf import csrf_exempt
 
-def generate_csv_report(data, filename, headers):
-    """Generate CSV report from data"""
-    response = HttpResponse(content_type='text/csv')
-    response['Content-Disposition'] = f'attachment; filename="{filename}.csv"'
-    
-    writer = csv.writer(response)
-    writer.writerow(headers)
-    writer.writerows(data)
-    
-    return response
 
-def generate_pdf_report(data, filename, title, headers, summary_data=None):
-    """Generate PDF report from data"""
-    response = HttpResponse(content_type='application/pdf')
-    response['Content-Disposition'] = f'attachment; filename="{filename}.pdf"'
+def get_token_user(request):
+    """Helper function to get user from token authentication (JWT or legacy token)"""
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Bearer '):
+        return None
     
-    # Create the PDF object
-    doc = SimpleDocTemplate(response, pagesize=A4)
-    elements = []
+    token = auth_header.replace('Bearer ', '')
     
-    # Get styles
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        'CustomTitle',
-        parent=styles['Heading1'],
-        fontSize=16,
-        spaceAfter=30,
-        alignment=TA_CENTER
-    )
+    # Try JWT token first
+    user = get_user_from_token(token)
+    if user:
+        return user
     
-    # Add title
-    elements.append(Paragraph(title, title_style))
-    elements.append(Spacer(1, 20))
-    
-    # Add summary if provided
-    if summary_data:
-        summary_style = ParagraphStyle(
-            'Summary',
-            parent=styles['Normal'],
-            fontSize=12,
-            spaceAfter=20
-        )
-        for key, value in summary_data.items():
-            elements.append(Paragraph(f"<b>{key}:</b> {value}", summary_style))
-        elements.append(Spacer(1, 20))
-    
-    # Create table
-    if data:
-        table = Table([headers] + data)
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 12),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-            ('TEXTCOLOR', (0, 1), (-1, -1), colors.black),
-            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-            ('FONTSIZE', (0, 1), (-1, -1), 10),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ]))
-        elements.append(table)
-    
-    # Build PDF
-    doc.build(elements)
-    return response
+    # Fallback to legacy token authentication (for backward compatibility)
+    try:
+        from rest_framework.authtoken.models import Token
+        token_obj = Token.objects.get(key=token)
+        return token_obj.user
+    except:
+        return None
 
-def register(request):
-    if request.method == 'POST':
-        form = SignUpForm(request.POST)
-        if form.is_valid():
-            user = form.save()
-            messages.success(request, f'Account created for {user.username}! You can now log in.')
-            return redirect('login')  # Redirect to login page after successful registration
-    else:
-        form = SignUpForm()
-    
-    return render(request, 'authentication/register.html', {'form': form})
 
-# Register API
 @csrf_exempt
 @require_http_methods(["POST"])
 def register_api(request):
@@ -226,20 +162,6 @@ def register_api(request):
             'errors': {'server': [str(e)]}
         }, status=500)
 
-def login_view(request):
-    if request.method == 'POST':
-        form = AuthenticationForm(request, data=request.POST)
-        if form.is_valid():
-            user = form.get_user()
-            auth_login(request, user)
-            messages.success(request, f'Welcome back, {user.username}!')
-            return redirect('dashboard')  # Redirect to dashboard or homepage
-        else:
-            # Form is invalid, re-render with errors
-            return render(request, 'authentication/login.html', {'form': form})
-    else:
-        form = AuthenticationForm()
-        return render(request, 'authentication/login.html', {'form': form})
 
 @csrf_exempt
 @require_http_methods(['POST'])
@@ -334,6 +256,7 @@ def login_api(request):
                 'server': ['An unexpected error occurred during login']
             }
         }, status=500)
+
 
 @csrf_exempt
 @require_http_methods(["POST"])
@@ -442,10 +365,6 @@ def verify_login_otp_api(request):
             }
         }, status=500)
 
-def logout_view(request):
-    auth_logout(request)
-    messages.success(request, 'You have been successfully logged out.')
-    return redirect('login')
 
 @csrf_exempt
 @require_http_methods(['POST'])
@@ -512,26 +431,6 @@ def refresh_token_api(request):
             'errors': {'server': [str(e)]}
         }, status=500)
 
-def get_token_user(request):
-    """Helper function to get user from token authentication (JWT or legacy token)"""
-    auth_header = request.headers.get('Authorization')
-    if not auth_header or not auth_header.startswith('Bearer '):
-        return None
-    
-    token = auth_header.replace('Bearer ', '')
-    
-    # Try JWT token first
-    user = get_user_from_token(token)
-    if user:
-        return user
-    
-    # Fallback to legacy token authentication (for backward compatibility)
-    try:
-        from rest_framework.authtoken.models import Token
-        token_obj = Token.objects.get(key=token)
-        return token_obj.user
-    except:
-        return None
 
 @csrf_exempt
 @require_http_methods(['GET'])
@@ -781,826 +680,6 @@ def dashboard_api(request):
             'errors': {'server': ['An unexpected error occurred']}
         }, status=500)
 
-# @csrf_exempt 
-# @require_http_methods(['POST'])
-# def bookmark_toggle_api(request, post_id):
-#     """API endpoint to toggle bookmark status"""
-#     try:
-#         # Get user from token
-#         user = get_token_user(request)
-#         if not user:
-#             return JsonResponse({
-#                 'success': False,
-#                 'message': 'Authentication required',
-#                 'errors': {'auth': ['Please provide valid authentication credentials']}
-#             }, status=401)
-        
-#         post = get_object_or_404(Post, id=post_id)
-        
-#         # Check if this post is already bookmarked by the user
-#         existing_bookmark = Bookmark.objects.filter(user=user, post=post).first()
-        
-#         if existing_bookmark:
-#             # If bookmark already existed, delete it (toggle off)
-#             existing_bookmark.delete()
-#             is_bookmarked = False
-#             status_text = 'removed'
-#         else:
-#             # Create a new bookmark
-#             Bookmark.objects.create(user=user, post=post)
-#             is_bookmarked = True
-#             status_text = 'added'
-        
-#         return JsonResponse({
-#             'success': True,
-#             'message': f'Bookmark {status_text} successfully',
-#             'data': {
-#                 'is_bookmarked': is_bookmarked,
-#                 'status': status_text,
-#                 'post_id': post_id
-#             }
-#         }, status=200)
-        
-#     except Exception as e:
-#         return JsonResponse({
-#             'success': False,
-#             'message': 'Error toggling bookmark',
-#             'errors': {'server': [str(e)]}
-#         }, status=500)
-
-# @csrf_exempt
-# @require_http_methods(['POST'])
-# def like_post_api(request, post_id):
-#     """API endpoint to toggle like status"""
-#     try:
-#         # Get user from token
-#         user = get_token_user(request)
-#         if not user:
-#             return JsonResponse({
-#                 'success': False,
-#                 'message': 'Authentication required',
-#                 'errors': {'auth': ['Please provide valid authentication credentials']}
-#             }, status=401)
-        
-#         post = get_object_or_404(Post, id=post_id)
-        
-#         if user in post.likes.all():
-#             post.likes.remove(user)
-#             liked = False
-#             status_text = 'removed'
-#         else:
-#             post.likes.add(user)
-#             liked = True
-#             status_text = 'added'
-        
-#         return JsonResponse({
-#             'success': True,
-#             'message': f'Like {status_text} successfully',
-#             'data': {
-#                 'liked': liked,
-#                 'total_likes': post.total_likes(),
-#                 'status': status_text,
-#                 'post_id': post_id
-#             }
-#         }, status=200)
-        
-#     except Exception as e:
-#         return JsonResponse({
-#             'success': False,
-#             'message': 'Error toggling like',
-#             'errors': {'server': [str(e)]}
-#         }, status=500)
-
-# @csrf_exempt
-# @require_http_methods(['GET'])
-# def categories_api(request):
-    """API endpoint to get all available categories"""
-    try:
-        categories_data = []
-        for choice in Post.CATEGORY_CHOICES:
-            # Get count of products in each category
-            count = Post.objects.filter(category=choice[0], inventory__gt=0).count()
-            categories_data.append({
-                'value': choice[0],
-                'label': choice[1],
-                'product_count': count
-            })
-        
-        return JsonResponse({
-            'success': True,
-            'message': 'Categories retrieved successfully',
-            'data': {
-                'categories': categories_data,
-                'total_categories': len(categories_data)
-            }
-        }, status=200)
-        
-    except Exception as e:
-        return JsonResponse({
-            'success': False,
-            'message': 'Error retrieving categories',
-            'errors': {'server': [str(e)]}
-        }, status=500)
-
-@login_required
-def dashboard(request):
-    """Legacy HTML view - kept for backward compatibility"""
-    # Get filter parameters from the request
-    search_query = request.GET.get('q', '').strip()
-    category = request.GET.get('category', '')
-    min_price = request.GET.get('min_price', '')
-    max_price = request.GET.get('max_price', '')
-    sort_by = request.GET.get('sort', 'newest')
-    
-    # Start with all products (no job posts anymore)
-    posts = Post.objects.all()
-    
-    # Filter out sold-out products (inventory must be greater than 0)
-    posts = posts.filter(inventory__gt=0)
-    
-    # Filter out the user's own products if they are a vendor
-    if request.user.is_vendor_role:
-        posts = posts.exclude(user=request.user)
-    
-    # Apply search filter if provided
-    if search_query:
-        posts = posts.filter(
-            Q(title__icontains=search_query) |
-            Q(description__icontains=search_query) |
-            Q(user__username__icontains=search_query)
-        )
-    
-    # Apply category filter if provided
-    if category:
-        # Convert to lowercase to match the model's CATEGORY_CHOICES keys
-        category = category.lower()
-        posts = posts.filter(category=category)
-    
-    # Apply price range filters
-    if min_price:
-        try:
-            posts = posts.filter(price__gte=float(min_price))
-        except ValueError:
-            pass
-    
-    if max_price:
-        try:
-            posts = posts.filter(price__lte=float(max_price))
-        except ValueError:
-            pass
-    
-    # Apply sorting
-    if sort_by == 'price_low':
-        posts = posts.order_by('price')
-    elif sort_by == 'price_high':
-        posts = posts.order_by('-price')
-    elif sort_by == 'popular':
-        posts = posts.order_by('-total_purchases', '-created_at')
-    elif sort_by == 'rating':
-        # Order by average rating (we'll implement this later)
-        posts = posts.order_by('-created_at')
-    else:  # newest (default)
-        posts = posts.order_by('-created_at')
-    
-    # Get all categories for the filter dropdown
-    categories = Post.CATEGORY_CHOICES
-    
-    # Get user's bookmarked posts for easier template rendering
-    bookmarked_posts = [bookmark.post.id for bookmark in Bookmark.objects.filter(user=request.user)]
-    
-    # Get user's liked posts for easier template rendering
-    liked_posts = [post.id for post in Post.objects.filter(likes=request.user)]
-    
-    # Pagination
-    paginator = Paginator(posts, 20)  # 20 products per page
-    page_number = request.GET.get('page')
-    page_obj = paginator.get_page(page_number)
-    
-    context = {
-        'posts': page_obj,
-        'search_query': search_query,
-        'selected_category': category,
-        'min_price': min_price,
-        'max_price': max_price,
-        'sort_by': sort_by,
-        'categories': categories,
-        'bookmarked_posts': bookmarked_posts,
-        'liked_posts': liked_posts,
-        'total_products': posts.count(),
-    }
-    
-    return render(request, 'authentication/dashboard.html', context)
-
-# @login_required
-# def post_detail(request, post_id):
-    post = get_object_or_404(Post, id=post_id)
-    is_bookmarked = Bookmark.objects.filter(user=request.user, post=post).exists()
-    
-    # Check if the user is the owner of the post
-    is_owner = (post.user == request.user)
-    
-    # Get auxiliary images for the product
-    auxiliary_images = ProductImage.objects.filter(product=post).order_by('display_order')
-    
-    # Allow repeat purchases - remove the restriction
-    # has_purchased = Purchase.objects.filter(
-    #     buyer=request.user, 
-    #     product=post, 
-    #     status__in=['completed', 'processing']
-    # ).exists()
-    has_purchased = False  # Always allow purchases
-    
-    # Get product reviews
-    reviews = ProductReview.objects.filter(product=post).order_by('-created_at')
-    
-    # Check if current user has already reviewed this product
-    user_review = None
-    if request.user.is_authenticated:
-        user_review = ProductReview.objects.filter(product=post, reviewer=request.user).first()
-    
-    context = {
-        'post': post,
-        'is_bookmarked': is_bookmarked,
-        'has_purchased': has_purchased,
-        'is_owner': is_owner,
-        'auxiliary_images': auxiliary_images,
-        'reviews': reviews,
-        'user_review': user_review,
-    }
-    
-    return render(request, 'authentication/post_detail.html', context)
-
-# @login_required
-# def purchase_product(request, post_id):
-#     if request.method == 'POST':
-#         product = get_object_or_404(Post, id=post_id)
-        
-#         # Check if user is trying to buy their own product
-#         if product.user == request.user:
-#             messages.error(request, "You cannot purchase your own product.")
-#             return redirect('post_detail', post_id=post_id)
-        
-#         # Check if price is None or not set
-#         if product.price is None:
-#             messages.error(request, f'Unable to purchase {product.title}. The product does not have a valid price.')
-#             return redirect('post_detail', post_id=post_id)
-        
-
-#         # Check if product is out of stock
-#         if product.inventory <= 0:
-#             messages.error(request, f'Sorry, {product.title} is currently out of stock.')
-#             return redirect('post_detail', post_id=post_id)
-        
-#         # Get quantity from form
-#         try:
-#             quantity = int(request.POST.get('quantity', 1))
-#             if quantity <= 0:
-#                 raise ValueError("Quantity must be positive")
-#         except (ValueError, TypeError):
-#             messages.error(request, "Please enter a valid quantity.")
-#             return redirect('post_detail', post_id=post_id)
-        
-#         # Check if enough inventory (with fresh data to prevent race conditions)
-#         product.refresh_from_db()  # Get latest inventory data
-#         if product.inventory < quantity:
-#             if product.inventory == 0:
-#                 messages.error(request, f'Sorry, {product.title} is now out of stock.')
-#             else:
-#                 messages.error(request, f'Sorry, there are only {product.inventory} items available.')
-#             return redirect('post_detail', post_id=post_id)
-        
-#         # Get delivery method and details
-#         delivery_method = request.POST.get('delivery_method', 'pickup')
-#         delivery_address = request.POST.get('delivery_address', '')
-#         delivery_latitude = request.POST.get('delivery_latitude')
-#         delivery_longitude = request.POST.get('delivery_longitude')
-#         payment_method = request.POST.get('payment_method', 'momo')  # New payment method field
-        
-#         # Calculate total price
-#         total_price = product.price * quantity
-#         delivery_fee = Decimal('5.00') if delivery_method == 'delivery' else Decimal('0.00')
-        
-#         # Validate delivery details if delivery is selected
-#         if delivery_method == 'delivery':
-#             if not delivery_address:
-#                 messages.error(request, "Please provide a delivery address for home delivery.")
-#                 return redirect('post_detail', post_id=post_id)
-        
-#         # Determine initial status based on delivery method
-#         initial_status = 'awaiting_delivery' if delivery_method == 'delivery' else 'awaiting_pickup'
-        
-#         # Create a new purchase with agaseke workflow
-#         purchase = Purchase(
-#             buyer=request.user,
-#             product=product,
-#             quantity=quantity,
-#             purchase_price=total_price,
-#             delivery_method=delivery_method,
-#             payment_method=payment_method,
-#             delivery_fee=delivery_fee,
-#             delivery_address=delivery_address,
-#             status=initial_status
-#         )
-        
-#         # Add location coordinates if provided
-#         if delivery_latitude and delivery_longitude:
-#             try:
-#                 purchase.delivery_latitude = float(delivery_latitude)
-#                 purchase.delivery_longitude = float(delivery_longitude)
-#             except (ValueError, TypeError):
-#                 pass  # Ignore invalid coordinates
-        
-#         purchase.save()
-        
-#         # Update inventory immediately after successful purchase
-#         product.inventory -= quantity
-        
-#         # Update statistics
-#         product.total_purchases += 1
-#         product.save()
-        
-#         # Update QR code to include this purchase
-#         from .qr_utils import update_user_qr_code
-#         update_user_qr_code(request.user)
-        
-#         # Success message based on delivery method
-#         if delivery_method == 'delivery':
-#             messages.success(request, f'You have successfully purchased {quantity} {product.title}! Total: RWF {total_price + delivery_fee:,.2f} (including RWF {delivery_fee:,.2f} delivery fee). agaseke will deliver to your address.')
-#         else:
-#             messages.success(request, f'You have successfully purchased {quantity} {product.title}! Please go to agaseke to collect your items.')
-        
-#         return redirect('purchase_history')
-    
-#     return redirect('post_detail', post_id=post_id)
-
-# @login_required
-# def bookmark_toggle(request, post_id):
-#     if request.method == 'POST':
-#         try:
-#             post = get_object_or_404(Post, id=post_id)
-            
-#             # Check if this post is already bookmarked by the user
-#             existing_bookmark = Bookmark.objects.filter(user=request.user, post=post).first()
-            
-#             if existing_bookmark:
-#                 # If bookmark already existed, delete it (toggle off)
-#                 existing_bookmark.delete()
-#                 is_bookmarked = False
-#                 status = 'removed'
-#             else:
-#                 # Create a new bookmark
-#                 Bookmark.objects.create(user=request.user, post=post)
-#                 is_bookmarked = True
-#                 status = 'added'
-            
-#             return JsonResponse({
-#                 'success': True,
-#                 'is_bookmarked': is_bookmarked,
-#                 'status': status,
-#                 'post_id': post_id
-#             })
-#         except Exception as e:
-#             return JsonResponse({
-#                 'success': False,
-#                 'error': str(e)
-#             }, status=500)
-    
-#     return JsonResponse({'error': 'Invalid request'}, status=400)
-
-# @login_required
-# def purchase_history(request):
-#     purchases = Purchase.objects.filter(buyer=request.user).order_by('-created_at')
-    
-#     # Check if export is requested
-#     export_format = request.GET.get('export')
-#     if export_format in ['csv', 'pdf']:
-#         # Prepare data for export
-#         headers = ['Order ID', 'Product', 'Seller', 'Date', 'Price', 'Status', 'Quantity', 'Delivery Method']
-#         data = []
-        
-#         for purchase in purchases:
-#             data.append([
-#                 purchase.order_id,
-#                 purchase.product.title,
-#                 f"{purchase.product.user.first_name} {purchase.product.user.last_name}",
-#                 purchase.created_at.strftime('%Y-%m-%d %H:%M'),
-#                 f"RWF {purchase.purchase_price:,.1f}",
-#                 purchase.status.title(),
-#                 purchase.quantity,
-#                 purchase.delivery_method.title()
-#             ])
-        
-#         # Summary data for PDF
-#         summary_data = {
-#             'Total Purchases': purchases.count(),
-#             'Total Spent': f"RWF {(purchases.aggregate(total=Sum('purchase_price'))['total'] or 0):,.1f}",
-#             'Completed Orders': purchases.filter(status='completed').count(),
-#             'Pending Orders': purchases.filter(status__in=['pending', 'processing']).count(),
-#             'Report Generated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-#         }
-        
-#         filename = f"purchase_history_{request.user.username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-#         title = f"Purchase History Report - {request.user.get_full_name() or request.user.username}"
-        
-#         if export_format == 'csv':
-#             return generate_csv_report(data, filename, headers)
-#         elif export_format == 'pdf':
-#             return generate_pdf_report(data, filename, title, headers, summary_data)
-    
-#     context = {
-#         'purchases': purchases
-#     }
-    
-#     return render(request, 'authentication/purchase_history.html', context)
-
-# @login_required
-# def bookmarks(request):
-#     bookmarks = Bookmark.objects.filter(user=request.user).order_by('-created_at')
-    
-#     context = {
-#         'bookmarks': bookmarks
-#     }
-    
-#     return render(request, 'authentication/bookmarks.html', context)
-
-# @login_required
-# def vendor_dashboard(request):
-#     # Ensure user is a vendor
-#     if not request.user.is_vendor_role:
-#         messages.error(request, 'You need to be registered as a vendor to access this dashboard.')
-#         return redirect('dashboard')
-    
-#     # Get vendor's products
-#     products = Post.objects.filter(user=request.user)
-    
-#     # Get purchases for vendor's products
-#     purchases = Purchase.objects.filter(product__user=request.user)
-    
-#     # Calculate statistics
-#     total_sales = purchases.filter(status='completed').count()
-#     total_revenue = request.user.total_sales
-    
-#     # Get recent purchases
-#     recent_purchases = purchases.order_by('-created_at')[:5]
-    
-#     context = {
-#         'products': products,
-#         'purchases': purchases,
-#         'total_sales': total_sales,
-#         'total_revenue': total_revenue,
-#         'recent_purchases': recent_purchases
-#     }
-    
-#     return render(request, 'authentication/vendor_dashboard.html', context)
-
-# @login_required
-# def user_settings(request):
-#     # Handle form submissions for profile/account updates and role upgrades
-#     if request.method == 'POST':
-#         form_type = request.POST.get('form_type')
-#         upgrade_type = request.POST.get('upgrade_type')
-        
-#         # Profile picture upload (AJAX request)
-#         if form_type == 'profile_picture':
-#             if 'profile_picture' in request.FILES:
-#                 try:
-#                     user = request.user
-#                     user.profile_picture = request.FILES['profile_picture']
-#                     user.save()
-                    
-#                     if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-#                         return JsonResponse({'success': True, 'message': 'Profile picture updated successfully!'})
-#                     else:
-#                         messages.success(request, 'Profile picture updated successfully!')
-#                         return redirect('user_settings')
-#                 except Exception as e:
-#                     if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-#                         return JsonResponse({'success': False, 'error': f'Failed to update profile picture: {str(e)}'})
-#                     else:
-#                         messages.error(request, f'Failed to update profile picture: {str(e)}')
-#             else:
-#                 if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
-#                     return JsonResponse({'success': False, 'error': 'No image file provided'})
-#                 else:
-#                     messages.error(request, 'No image file provided')
-        
-#         # Profile form submission
-#         elif form_type == 'profile':
-#             first_name = request.POST.get('first_name')
-#             last_name = request.POST.get('last_name')
-#             email = request.POST.get('email')
-#             phone_number = request.POST.get('phone_number')
-            
-#             # Update user profile
-#             request.user.first_name = first_name
-#             request.user.last_name = last_name
-#             request.user.email = email
-#             request.user.phone_number = phone_number
-            
-#             # Handle profile picture upload if included in the form
-#             profile_picture = request.FILES.get('profile_picture')
-#             if profile_picture:
-#                 request.user.profile_picture = profile_picture
-            
-#             request.user.save()
-#             messages.success(request, 'Profile updated successfully.')
-#             return redirect('user_settings')
-        
-#         # Account form submission (password change)
-#         elif form_type == 'account':
-#             new_password = request.POST.get('new_password')
-#             confirm_password = request.POST.get('confirm_password')
-            
-#             if new_password and confirm_password:
-#                 if new_password == confirm_password:
-#                     request.user.set_password(new_password)
-#                     request.user.save()
-#                     messages.success(request, 'Password changed successfully. Please log in again.')
-#                     return redirect('login')
-#                 else:
-#                     messages.error(request, 'Passwords do not match.')
-#             else:
-#                 messages.error(request, 'Please fill in both password fields.')
-        
-#         # Role upgrade form submissions
-#         elif upgrade_type == 'vendor':
-#             # Process vendor upgrade
-#             if request.user.is_vendor_role:
-#                 messages.info(request, 'You are already registered as a vendor.')
-#             else:
-#                 # Enable vendor role without changing other roles
-#                 request.user.is_vendor_role = True
-#                 request.user.save()
-#                 messages.success(request, 'Congratulations! Your account has been upgraded to include Vendor capabilities. You can now create product posts.')
-    
-#     return render(request, 'authentication/settings.html')
-
-# @login_required
-# def create_post(request):
-#     # Check if user has vendor permissions
-#     if not request.user.is_vendor_role:
-#         messages.error(request, 'You need to upgrade your account to Vendor status to create product listings.')
-#         return redirect('user_settings')
-    
-#     # Direct to product creation since we only have products now
-#     return redirect('create_product')
-
-# @login_required
-# def create_product(request):
-#     # Check if user has vendor role
-#     if not request.user.is_vendor_role:
-#         messages.error(request, 'You need to upgrade your account to Vendor status to create product listings.')
-#         return redirect('user_settings')
-    
-#     if request.method == 'POST':
-#         title = request.POST.get('title')
-#         description = request.POST.get('description')
-#         main_image = request.FILES.get('main_image')
-#         price = request.POST.get('price')
-#         category = request.POST.get('category')
-#         inventory = request.POST.get('inventory', 1)
-        
-#         try:
-#             inventory = int(inventory)
-#             if inventory < 0:
-#                 inventory = 1
-#         except (ValueError, TypeError):
-#             inventory = 1
-        
-#         if title and description and main_image and price:
-#             # Create the main product (no post_type needed since all posts are products now)
-#             post = Post(
-#                 title=title,
-#                 description=description,
-#                 image=main_image,
-#                 user=request.user,
-#                 price=price,
-#                 category=category,
-#                 inventory=inventory
-#             )
-#             post.save()
-            
-#             # Process auxiliary images (limit to 5)
-#             auxiliary_images = request.FILES.getlist('auxiliary_images')
-#             print(f"DEBUG: Found {len(auxiliary_images)} auxiliary images in create_product")
-#             max_images = min(len(auxiliary_images), 5)  # Limit to 5 images
-            
-#             for i in range(max_images):
-#                 print(f"DEBUG: Creating auxiliary image {i+1} of {max_images}")
-#                 ProductImage.objects.create(
-#                     product=post,
-#                     image=auxiliary_images[i],
-#                     display_order=i
-#                 )
-                
-#             messages.success(request, 'Product listing created successfully!')
-#             return redirect('dashboard')
-#         else:
-#             messages.error(request, 'Please fill all required fields')
-    
-#     return render(request, 'authentication/create_product.html')
-
-# @login_required
-# def like_post(request, post_id):
-#     if request.method == 'POST':
-#         try:
-#             post = get_object_or_404(Post, id=post_id)
-            
-#             if request.user in post.likes.all():
-#                 post.likes.remove(request.user)
-#                 liked = False
-#             else:
-#                 post.likes.add(request.user)
-#                 liked = True
-                
-#             return JsonResponse({
-#                 'liked': liked,
-#                 'total_likes': post.total_likes()
-#             })
-#         except Exception as e:
-#             return JsonResponse({
-#                 'error': str(e)
-#             }, status=500)
-    
-#     return JsonResponse({'error': 'Invalid request'}, status=400)
-
-# Below functions are kept for backward compatibility but redirect to settings page
-# @login_required
-# def become_vendor(request):
-#     if request.method == 'POST':
-#         if request.user.is_vendor_role:
-#             messages.info(request, 'You are already registered as a vendor.')
-#         else:
-#             request.user.is_vendor_role = True
-#             request.user.save()
-#             messages.success(request, 'Congratulations! Your account has been upgraded to Vendor status. You can now create product posts.')
-    
-#     return redirect('user_settings')
-
-# @login_required
-# def edit_product(request, product_id):
-#     # Check if user has vendor role
-#     if not request.user.is_vendor_role:
-#         messages.error(request, 'You need to have Vendor status to edit product listings.')
-#         return redirect('dashboard')
-    
-#     # Get the product (ensure it belongs to the user)
-#     product = get_object_or_404(Post, id=product_id, user=request.user)
-    
-#     # Business Rule: Check if product has been purchased or bookmarked
-#     has_purchases = Purchase.objects.filter(product=product).exists()
-#     has_bookmarks = Bookmark.objects.filter(post=product).exists()
-    
-#     if has_purchases or has_bookmarks:
-#         messages.error(request, 'This product cannot be edited as it has been purchased or bookmarked by customers.')
-#         return redirect('vendor_dashboard')
-    
-#     # Get existing auxiliary images
-#     auxiliary_images = ProductImage.objects.filter(product=product).order_by('display_order')
-    
-#     if request.method == 'POST':
-#         title = request.POST.get('title')
-#         description = request.POST.get('description')
-#         price = request.POST.get('price')
-#         category = request.POST.get('category')
-#         inventory = request.POST.get('inventory')
-        
-#         if title and description and price:
-#             # Update product details
-#             product.title = title
-#             product.description = description
-#             product.price = price
-#             product.category = category
-            
-#             # Update inventory if provided
-#             if inventory:
-#                 try:
-#                     inventory_value = int(inventory)
-#                     if inventory_value >= 0:
-#                         product.inventory = inventory_value
-#                 except (ValueError, TypeError):
-#                     pass  # Keep existing inventory if invalid value
-            
-#             # Handle main image update if provided
-#             main_image = request.FILES.get('main_image')
-#             if main_image:
-#                 product.image = main_image
-            
-#             product.save()
-            
-#             # Handle auxiliary images
-#             # Check if any auxiliary images should be deleted
-#             images_to_keep = request.POST.getlist('keep_auxiliary_image')
-            
-#             # Delete images not in the keep list
-#             for aux_image in auxiliary_images:
-#                 if str(aux_image.id) not in images_to_keep:
-#                     aux_image.delete()
-            
-#             # Count remaining images after deletion
-#             remaining_images_count = ProductImage.objects.filter(product=product).count()
-            
-#             # Calculate how many new images we can add
-#             max_new_images = 5 - remaining_images_count
-            
-#             if max_new_images > 0:
-#                 # Add new auxiliary images up to the allowed limit
-#                 new_auxiliary_images = request.FILES.getlist('auxiliary_images')
-#                 print(f"DEBUG: Found {len(new_auxiliary_images)} new auxiliary images")
-#                 max_to_add = min(len(new_auxiliary_images), max_new_images)
-                
-#                 for i in range(max_to_add):
-#                     print(f"DEBUG: Creating auxiliary image {i+1} of {max_to_add}")
-#                     ProductImage.objects.create(
-#                         product=product,
-#                         image=new_auxiliary_images[i],
-#                         display_order=remaining_images_count + i
-#                     )
-            
-#             messages.success(request, 'Product updated successfully!')
-#             return redirect('vendor_dashboard')
-#         else:
-#             messages.error(request, 'Please fill all required fields')
-    
-#     context = {
-#         'product': product,
-#         'auxiliary_images': auxiliary_images
-#     }
-    
-#     return render(request, 'authentication/edit_product.html', context)
-
-# agaseke Views
-@login_required
-@ensure_csrf_cookie
-def user_qr_code(request):
-    """Display user's QR code with their purchase information"""
-    # Update/create QR code for the user
-    user_qr = update_user_qr_code(request.user)
-    
-    # Get user's pending purchases (both pickup and delivery)
-    pending_purchases = Purchase.objects.filter(
-        buyer=request.user,
-        status__in=['awaiting_pickup', 'awaiting_delivery']
-    ).select_related('product')
-    
-    context = {
-        'user_qr': user_qr,
-        'pending_purchases': pending_purchases,
-        'qr_expires_at': user_qr.expires_at,
-    }
-    
-    return render(request, 'authentication/user_qr_code.html', context)
-
-@login_required
-def agaseke_dashboard(request):
-    """Legacy HTML view - kept for backward compatibility"""
-    if not request.user.is_agaseke():
-        messages.error(request, 'Access denied. agaseke role required.')
-        return redirect('dashboard')
-    
-    # Get all purchases awaiting pickup
-    awaiting_purchases = Purchase.objects.filter(
-        status='awaiting_pickup'
-    ).select_related('buyer', 'product', 'product__user').order_by('-created_at')
-    
-    # Get all purchases awaiting delivery
-    awaiting_deliveries = Purchase.objects.filter(
-        status='awaiting_delivery'
-    ).select_related('buyer', 'product', 'product__user').order_by('-created_at')
-    
-    # Get orders out for delivery
-    out_for_delivery = Purchase.objects.filter(
-        status='out_for_delivery'
-    ).select_related('buyer', 'product', 'product__user').order_by('-created_at')
-    
-    # Get completed purchases for revenue tracking
-    completed_purchases = Purchase.objects.filter(
-        status='completed',
-        agaseke_user=request.user
-    ).select_related('buyer', 'product')
-    
-    # Calculate revenue statistics
-    total_commission = completed_purchases.aggregate(
-        total=Sum('agaseke_commission_amount')
-    )['total'] or 0
-    
-    monthly_commission = completed_purchases.filter(
-        pickup_confirmed_at__month=timezone.now().month,
-        pickup_confirmed_at__year=timezone.now().year
-    ).aggregate(total=Sum('agaseke_commission_amount'))['total'] or 0
-    
-    context = {
-        'awaiting_purchases': awaiting_purchases,
-        'awaiting_deliveries': awaiting_deliveries,
-        'out_for_delivery': out_for_delivery,
-        'completed_purchases': completed_purchases[:10],  # Latest 10
-        'total_commission': total_commission,
-        'monthly_commission': monthly_commission,
-        'total_completed': completed_purchases.count(),
-    }
-    
-    return render(request, 'authentication/agaseke_dashboard.html', context)
-
 
 @csrf_exempt
 @require_http_methods(['GET'])
@@ -1689,306 +768,6 @@ def agaseke_dashboard_api(request):
             'errors': {'server': [str(e)]}
         }, status=500)
 
-@login_required
-def scan_qr_code(request):
-    """QR code scanner interface for agaseke users"""
-    try:
-        if not request.user.is_agaseke():
-            messages.error(request, 'Access denied. agaseke role required.')
-            return redirect('dashboard')
-        
-        # Create context for rendering
-        context = {
-            'page_title': 'QR Code Scanner',
-            'error_message': None,
-            'success_message': None,
-        }
-        
-        if request.method == 'POST':
-            qr_data = request.POST.get('qr_data')
-            purchase_id = request.POST.get('purchase_id')
-            
-            if not qr_data:
-                context['error_message'] = 'No QR data provided'
-                messages.error(request, context['error_message'])
-                return render(request, 'authentication/scan_qr_code.html', context)
-            
-            try:
-                # Decode QR data
-                decoded_data = decode_qr_data(qr_data.strip())
-                
-                if isinstance(decoded_data, dict) and 'error' in decoded_data:
-                    context['error_message'] = decoded_data['error']
-                    messages.error(request, decoded_data['error'])
-                    return render(request, 'authentication/scan_qr_code.html', context)
-                
-                # Get purchase information
-                purchase_info = get_user_purchases_from_qr(decoded_data)
-                
-                # If no purchases found or empty QR data
-                if not purchase_info.get('purchases'):
-                    context['error_message'] = 'No pending purchases found in this QR code.'
-                    messages.warning(request, context['error_message'])
-                    return render(request, 'authentication/scan_qr_code.html', context)
-                
-                # If purchase_id is provided, complete that specific purchase
-                if purchase_id:
-                    try:
-                        # Find the specific purchase from the database
-                        purchase = Purchase.objects.get(id=purchase_id)
-                        
-                        # Verify the purchase belongs to the user in the QR code
-                        if purchase.buyer.id != purchase_info['user_id']:
-                            context['error_message'] = 'Purchase verification failed: User mismatch.'
-                            messages.error(request, context['error_message'])
-                            return render(request, 'authentication/scan_qr_code.html', context)
-                        
-                        # Complete the purchase directly (fallback from JS flow)
-                        purchase.status = 'completed'
-                        purchase.agaseke_user = request.user
-                        purchase.pickup_confirmed_at = timezone.now()
-                        purchase.save()
-                        
-                        # Update vendor and buyer stats
-                        vendor = purchase.product.user
-                        vendor.total_sales += purchase.vendor_payment_amount
-                        vendor.save()
-                        
-                        buyer = purchase.buyer
-                        buyer.total_purchases += (purchase.purchase_price * purchase.quantity)
-                        buyer.save()
-                        
-                        # Success message
-                        context['success_message'] = f'Purchase {purchase.order_id} confirmed successfully! Vendor payment: RWF{purchase.vendor_payment_amount}, agaseke commission: RWF{purchase.agaseke_commission_amount}'
-                        messages.success(request, context['success_message'])
-                        
-                        # Redirect to dashboard after successful completion
-                        return redirect('agaseke_dashboard')
-                    except Purchase.DoesNotExist:
-                        context['error_message'] = f'Purchase not found with ID: {purchase_id}'
-                        messages.error(request, context['error_message'])
-                        return render(request, 'authentication/scan_qr_code.html', context)
-                    except Exception as e:
-                        context['error_message'] = f'Error processing purchase: {str(e)}'
-                        messages.error(request, context['error_message'])
-                        return render(request, 'authentication/scan_qr_code.html', context)
-                
-                # If no specific purchase_id, show all purchases
-                user = get_object_or_404(User, id=purchase_info['user_id'])
-                
-                # Add data to context
-                context.update({
-                    'qr_data': purchase_info,
-                    'user_info': user,
-                    'success_message': f'Successfully retrieved purchase information for {user.username}.'
-                })
-                
-                messages.success(request, context['success_message'])
-                return render(request, 'authentication/scan_qr_code.html', context)
-                
-            except IOError as e:
-                error_msg = f"QR code processing error: {str(e)}"
-                context['error_message'] = error_msg
-                messages.error(request, error_msg)
-                return render(request, 'authentication/scan_qr_code.html', context)
-            except Exception as e:
-                error_msg = f"Unexpected error: {str(e)}"
-                context['error_message'] = error_msg
-                messages.error(request, error_msg)
-                return render(request, 'authentication/scan_qr_code.html', context)
-        
-        # For GET requests, just render the scan page
-        return render(request, 'authentication/scan_qr_code.html', context)
-        
-    except Exception as e:
-        messages.error(request, f"System error: {str(e)}")
-        return redirect('agaseke_dashboard')
-
-@login_required
-def confirm_purchase_pickup(request, purchase_id):
-    """Confirm purchase pickup and initiate OTP verification"""
-    if not request.user.is_agaseke():
-        messages.error(request, 'Access denied. agaseke role required.')
-        return redirect('dashboard')
-    
-    purchase = get_object_or_404(Purchase, id=purchase_id, status='awaiting_pickup')
-    
-    if request.method == 'POST':
-        action = request.POST.get('action')
-        
-        if action == 'request_otp':
-            # Create OTP for buyer
-            otp_result = create_otp(purchase.buyer, 'purchase_confirmation')
-            
-            return JsonResponse({
-                'success': True,
-                'message': f'OTP sent to {purchase.buyer.email}',
-                'otp_id': otp_result['otp_id']
-            })
-        
-        elif action == 'verify_otp':
-            password = request.POST.get('password')
-            otp_code = request.POST.get('otp_code')
-            
-            # Verify buyer's password
-            if not purchase.buyer.check_password(password):
-                return JsonResponse({
-                    'success': False,
-                    'error': 'Invalid password'
-                })
-            
-            # Verify OTP
-            otp_result = verify_otp(purchase.buyer, otp_code, 'purchase_confirmation')
-            
-            if not otp_result['valid']:
-                return JsonResponse({
-                    'success': False,
-                    'error': otp_result['error']
-                })
-            
-            # Complete the purchase
-            purchase.status = 'completed'
-            purchase.agaseke_user = request.user
-            purchase.pickup_confirmed_at = timezone.now()
-            purchase.save()
-            
-            # Update vendor and buyer stats
-            vendor = purchase.product.user
-            vendor.total_sales += purchase.vendor_payment_amount
-            vendor.save()
-            
-            buyer = purchase.buyer
-            buyer.total_purchases += (purchase.purchase_price * purchase.quantity)
-            buyer.save()
-            
-            # Update product sales count only (inventory was already decremented during purchase)
-            product = purchase.product
-            product.total_purchases += purchase.quantity
-            product.save()
-            
-            return JsonResponse({
-                'success': True,
-                'message': 'Purchase confirmed successfully!',
-                'vendor_payment': str(purchase.vendor_payment_amount),
-                'agaseke_commission': str(purchase.agaseke_commission_amount)
-            })
-    
-    context = {
-        'purchase': purchase,
-        'payment_split': purchase.calculate_payment_split()
-    }
-    
-    return render(request, 'authentication/confirm_purchase_pickup.html', context)
-
-@login_required
-def confirm_delivery(request, purchase_id):
-    """Confirm delivery completion and initiate OTP verification"""
-    if not request.user.is_agaseke():
-        messages.error(request, 'Access denied. agaseke role required.')
-        return redirect('dashboard')
-    
-    purchase = get_object_or_404(Purchase, id=purchase_id, status__in=['awaiting_delivery', 'out_for_delivery'])
-    
-    if request.method == 'POST':
-        action = request.POST.get('action')
-        
-        if action == 'mark_out_for_delivery':
-            # Mark as out for delivery
-            purchase.status = 'out_for_delivery'
-            purchase.save()
-            
-            return JsonResponse({
-                'success': True,
-                'message': 'Order marked as out for delivery!'
-            })
-        
-        elif action == 'request_otp':
-            # Create OTP for buyer
-            otp_result = create_otp(purchase.buyer, 'delivery_confirmation')
-            
-            return JsonResponse({
-                'success': True,
-                'message': f'OTP sent to {purchase.buyer.email}',
-                'otp_id': otp_result['otp_id']
-            })
-        
-        elif action == 'verify_delivery':
-            password = request.POST.get('password')
-            otp_code = request.POST.get('otp_code')
-            
-            # Verify buyer's password
-            if not purchase.buyer.check_password(password):
-                return JsonResponse({
-                    'success': False,
-                    'error': 'Invalid password'
-                })
-            
-            # Verify OTP
-            otp_result = verify_otp(purchase.buyer, otp_code, 'delivery_confirmation')
-            
-            if not otp_result['valid']:
-                return JsonResponse({
-                    'success': False,
-                    'error': otp_result['error']
-                })
-            
-            # Complete the delivery
-            purchase.status = 'completed'
-            purchase.agaseke_user = request.user
-            purchase.pickup_confirmed_at = timezone.now()  # Using same field for delivery confirmation time
-            purchase.save()
-            
-            # Update vendor and buyer stats
-            vendor = purchase.product.user
-            vendor.total_sales += purchase.vendor_payment_amount
-            vendor.save()
-            
-            buyer = purchase.buyer
-            buyer.total_purchases += purchase.purchase_price
-            buyer.save()
-            
-            # Update product sales count only (inventory was already decremented during purchase)
-            product = purchase.product
-            product.total_purchases += purchase.quantity
-            product.save()
-            
-            return JsonResponse({
-                'success': True,
-                'message': 'Delivery confirmed successfully!',
-                'vendor_payment': str(purchase.vendor_payment_amount),
-                'agaseke_commission': str(purchase.agaseke_commission_amount)
-            })
-    
-    context = {
-        'purchase': purchase,
-        'payment_split': purchase.calculate_payment_split(),
-        'is_delivery': True
-    }
-    
-    return render(request, 'authentication/confirm_purchase_pickup.html', context)
-
-@login_required
-@ensure_csrf_cookie
-@require_http_methods(["POST"])
-def update_qr_code_ajax(request):
-    """AJAX endpoint to update user's QR code"""
-    print(f"Update QR request received:")
-    print(f"Method: {request.method}")
-    print(f"Headers: {dict(request.headers)}")
-    print(f"CSRF Token in POST: {request.POST.get('csrfmiddlewaretoken', 'Not found')}")
-    print(f"CSRF Token in META: {request.META.get('HTTP_X_CSRFTOKEN', 'Not found')}")
-    
-    if request.method == 'POST':
-        user_qr = update_user_qr_code(request.user)
-        
-        return JsonResponse({
-            'success': True,
-            'qr_image_url': user_qr.qr_image.url if user_qr.qr_image else None,
-            'expires_at': user_qr.expires_at.isoformat()
-        })
-    
-    return JsonResponse({'success': False, 'error': 'Invalid request method'})
-
 
 @csrf_exempt
 @require_http_methods(['GET', 'POST'])
@@ -2012,7 +791,7 @@ def user_qr_code_api(request):
             }, status=401)
         
         # Generate or update QR code
-        from .qr_utils import update_user_qr_code, create_qr_image, generate_user_qr_data
+        from .qr_utils import update_user_qr_code
         import base64
         from io import BytesIO
         
@@ -2036,7 +815,6 @@ def user_qr_code_api(request):
                 logger.error(f"Error reading QR image: {str(e)}")
         
         # Get pending purchases count
-        from products.models import Purchase
         pending_purchases = Purchase.objects.filter(
             buyer=user,
             status__in=['awaiting_pickup', 'awaiting_delivery']
@@ -2068,358 +846,790 @@ def user_qr_code_api(request):
             'errors': {'server': [str(e)]}
         }, status=500)
 
-# @login_required
-# def agaseke_purchase_history(request):
-#     """View purchase history for agaseke users"""
-#     if not request.user.is_agaseke():
-#         messages.error(request, 'Access denied. agaseke role required.')
-#         return redirect('dashboard')
+@csrf_exempt
+@require_http_methods(['POST'])
+def get_purchases_by_qr(request):
+    """API endpoint to get purchases from a QR code"""
+    # Get user from token (for API authentication)
+    user = get_token_user(request)
+    if not user:
+        return JsonResponse({
+            'error': 'Authentication required',
+            'purchases': []
+        }, status=401)
     
-#     purchases = Purchase.objects.filter(
-#         agaseke_user=request.user,
-#         status='completed'
-#     ).select_related('buyer', 'product', 'product__user').order_by('-pickup_confirmed_at')
+    if not user.is_agaseke():
+        return JsonResponse({'error': 'Access denied. agaseke role required.', 'purchases': []}, status=403)
     
-#     # Pagination could be added here
-#     context = {
-#         'purchases': purchases,
-#         'total_commission': purchases.aggregate(
-#             total=Sum('agaseke_commission_amount')
-#         )['total'] or 0
-#     }
-    
-#     return render(request, 'authentication/agaseke_purchase_history.html', context)
+    try:
+        data = json.loads(request.body)
+        qr_data = data.get('qr_data')
+        
+        if not qr_data:
+            return JsonResponse({'error': 'No QR data provided', 'purchases': []}, status=400)
+        
+        # Decode QR data
+        decoded_data = decode_qr_data(qr_data.strip())
+        
+        if isinstance(decoded_data, dict) and 'error' in decoded_data:
+            return JsonResponse({'error': decoded_data['error'], 'purchases': []}, status=400)
+        
+        # Get purchase information
+        purchase_info = get_user_purchases_from_qr(decoded_data)
+        
+        # If no purchases found or empty QR data
+        if not purchase_info.get('purchases'):
+            # Still return user info if possible
+            user_info = {}
+            try:
+                user = User.objects.get(id=purchase_info.get('user_id'))
+                user_info = {
+                    'id': user.id,
+                    'username': user.username,
+                    'first_name': user.first_name,
+                    'last_name': user.last_name,
+                    'email': user.email
+                }
+            except Exception:
+                pass
+            return JsonResponse({
+                'error': 'No pending purchases found in this QR code.',
+                'purchases': [],
+                'buyer': user_info
+            }, status=404)
+        
+        # Add buyer information
+        try:
+            user = User.objects.get(id=purchase_info['user_id'])
+            purchase_info['buyer'] = {
+                'id': user.id,
+                'username': user.username,
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+                'email': user.email
+            }
+        except User.DoesNotExist:
+            return JsonResponse({'error': 'User not found', 'purchases': []}, status=404)
+        
+        # Always include purchases key
+        if 'purchases' not in purchase_info:
+            purchase_info['purchases'] = []
+        
+        return JsonResponse(purchase_info)
+    except Exception as e:
+        import traceback
+        print('Error in get_purchases_by_qr:', traceback.format_exc())
+        return JsonResponse({'error': f'Error processing request: {str(e)}', 'purchases': []}, status=500)
 
-# @login_required
-# def sales_statistics(request):
-#     """Sales statistics view showing detailed financial breakdown for vendors and agaseke agents"""
+@csrf_exempt
+@require_http_methods(['POST'])
+def verify_buyer_credentials(request):
+    """API endpoint to verify buyer credentials"""
+    # Get user from token (for API authentication)
+    user = get_token_user(request)
+    if not user:
+        return JsonResponse({
+            'error': 'Authentication required'
+        }, status=401)
     
-#     # Check if export is requested
-#     export_format = request.GET.get('export')
+    if not user.is_agaseke():
+        return JsonResponse({'error': 'Access denied. agaseke role required.'}, status=403)
     
-#     if request.user.is_vendor_role:
-#         # Vendor statistics - show their earnings (80% of product price)
-#         purchases = Purchase.objects.filter(
-#             product__user=request.user,
-#             status='completed'
-#         ).select_related('product', 'buyer')
+    try:
+        data = json.loads(request.body)
+        username = data.get('username')
+        password = data.get('password')
+        user_id = data.get('user_id')  # This should match the user from the QR code
         
-#         # Calculate vendor statistics
-#         total_sales = purchases.count()
-#         total_revenue = purchases.aggregate(
-#             total=Sum('vendor_payment_amount')
-#         )['total'] or 0
+        if not all([username, password, user_id]):
+            return JsonResponse({'error': 'Missing required fields'}, status=400)
         
-#         # Monthly statistics
-#         current_month = timezone.now().month
-#         current_year = timezone.now().year
-#         monthly_purchases = purchases.filter(
-#             pickup_confirmed_at__month=current_month,
-#             pickup_confirmed_at__year=current_year
-#         )
-#         monthly_revenue = monthly_purchases.aggregate(
-#             total=Sum('vendor_payment_amount')
-#         )['total'] or 0
+        # Verify credentials
+        user = authenticate(username=username, password=password)
         
-#         # Product-wise breakdown
-#         product_stats = purchases.values('product__title').annotate(
-#             total_sales=Count('id'),
-#             total_revenue=Sum('vendor_payment_amount'),
-#             avg_price=Avg('vendor_payment_amount')
-#         ).order_by('-total_revenue')
+        if not user:
+            return JsonResponse({'error': 'Invalid username or password'}, status=401)
         
-#         # Recent transactions
-#         recent_transactions = purchases.order_by('-pickup_confirmed_at')[:10]
+        # Ensure the authenticated user matches the user from the QR code
+        if user.id != int(user_id):
+            return JsonResponse({'error': 'Authentication failed. User mismatch.'}, status=401)
         
-#         # Handle export for vendor
-#         if export_format in ['csv', 'pdf']:
-#             if export_format == 'csv':
-#                 headers = ['Product', 'Total Sales', 'Total Revenue', 'Average Price']
-#                 data = []
-#                 for product in product_stats:
-#                     data.append([
-#                         product['product__title'],
-#                         product['total_sales'],
-#                         f"RWF {product['total_revenue']:,.1f}",
-#                         f"RWF {product['avg_price']:,.1f}"
-#                     ])
-#                 filename = f"vendor_sales_{request.user.username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-#                 return generate_csv_report(data, filename, headers)
-#             elif export_format == 'pdf':
-#                 headers = ['Product', 'Total Sales', 'Total Revenue', 'Average Price']
-#                 data = []
-#                 for product in product_stats:
-#                     data.append([
-#                         product['product__title'],
-#                         product['total_sales'],
-#                         f"RWF {product['total_revenue']:,.1f}",
-#                         f"RWF {product['avg_price']:,.1f}"
-#                     ])
-#                 summary_data = {
-#                     'Total Sales': total_sales,
-#                     'Total Revenue': f"RWF {total_revenue:,.1f}",
-#                     'Monthly Revenue': f"RWF {monthly_revenue:,.1f}",
-#                     'Commission Rate': '80%',
-#                     'Report Generated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-#                 }
-#                 filename = f"vendor_sales_{request.user.username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-#                 title = f"Vendor Sales Report - {request.user.get_full_name() or request.user.username}"
-#                 return generate_pdf_report(data, filename, title, headers, summary_data)
-        
-#         context = {
-#             'user_type': 'vendor',
-#             'total_sales': total_sales,
-#             'total_revenue': total_revenue,
-#             'monthly_revenue': monthly_revenue,
-#             'monthly_sales': monthly_purchases.count(),
-#             'product_stats': product_stats,
-#             'recent_transactions': recent_transactions,
-#             'commission_rate': 80,  # Vendor gets 80%
-#             'agaseke_rate': 20,   # agaseke gets 20%
-#         }
-        
-#     elif request.user.is_agaseke():
-#         # agaseke agent statistics - show their commission (20% of product price + delivery fees)
-#         purchases = Purchase.objects.filter(
-#             agaseke_user=request.user,
-#             status='completed'
-#         ).select_related('product', 'buyer', 'product__user')
-        
-#         # Calculate agaseke statistics
-#         total_transactions = purchases.count()
-#         total_commission = purchases.aggregate(
-#             total=Sum('agaseke_commission_amount')
-#         )['total'] or 0
-        
-#         # Monthly statistics
-#         current_month = timezone.now().month
-#         current_year = timezone.now().year
-#         monthly_purchases = purchases.filter(
-#             pickup_confirmed_at__month=current_month,
-#             pickup_confirmed_at__year=current_year
-#         )
-#         monthly_commission = monthly_purchases.aggregate(
-#             total=Sum('agaseke_commission_amount')
-#         )['total'] or 0
-        
-#         # Breakdown by commission type
-#         total_product_price = purchases.aggregate(total=Sum('purchase_price'))['total'] or 0
-#         total_delivery_fees = purchases.aggregate(total=Sum('delivery_fee'))['total'] or 0
-#         total_commission_amount = purchases.aggregate(total=Sum('agaseke_commission_amount'))['total'] or 0
-        
-#         commission_breakdown = {
-#             'product_commission': total_product_price * Decimal('0.2'),
-#             'delivery_fees': total_delivery_fees,
-#             'total_commission': total_commission_amount
-#         }
-        
-#         # Vendor-wise breakdown - get unique vendors with their stats
-#         vendor_stats = []
-        
-#         # Use values() to get unique vendors with their aggregated stats
-#         vendor_aggregates = purchases.values('product__user__id', 'product__user__username').annotate(
-#             total_transactions=Count('id'),
-#             total_commission=Sum('agaseke_commission_amount'),
-#             avg_commission=Avg('agaseke_commission_amount')
-#         ).order_by('-total_commission')
-        
-#         for vendor_data in vendor_aggregates:
-#             vendor_stats.append({
-#                 'vendor_id': vendor_data['product__user__id'],
-#                 'vendor_username': vendor_data['product__user__username'],
-#                 'total_transactions': vendor_data['total_transactions'],
-#                 'total_commission': vendor_data['total_commission'] or 0,
-#                 'avg_commission': vendor_data['avg_commission'] or 0
-#             })
-        
+        return JsonResponse({
+            'success': True,
+            'user': {
+                'id': user.id,
+                'username': user.username,
+                'email': user.email
+            }
+        })
+    except Exception as e:
+        return JsonResponse({'error': f'Error processing request: {str(e)}'}, status=500)
 
+@csrf_exempt
+@require_http_methods(['POST'])
+def send_otp(request):
+    """API endpoint to send OTP for purchase verification"""
+    # Get user from token (for API authentication)
+    user = get_token_user(request)
+    if not user:
+        return JsonResponse({
+            'error': 'Authentication required'
+        }, status=401)
+    
+    if not user.is_agaseke():
+        return JsonResponse({'error': 'Access denied. agaseke role required.'}, status=403)
+    
+    try:
+        data = json.loads(request.body)
+        user_id = data.get('user_id')
+        purchase_id = data.get('purchase_id')
         
-#         # Recent transactions
-#         recent_transactions = purchases.order_by('-pickup_confirmed_at')[:10]
+        if not user_id:
+            return JsonResponse({'error': 'Missing user_id'}, status=400)
         
-#         # Handle export for agaseke
-#         if export_format in ['csv', 'pdf']:
-#             if export_format == 'csv':
-#                 headers = ['Vendor', 'Transactions', 'Total Commission', 'Average Commission']
-#                 data = []
-#                 for vendor in vendor_stats:
-#                     data.append([
-#                         vendor['vendor_username'],
-#                         vendor['total_transactions'],
-#                         f"RWF {vendor['total_commission']:,.1f}",
-#                         f"RWF {vendor['avg_commission']:,.1f}"
-#                     ])
-#                 filename = f"agaseke_commission_{request.user.username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-#                 return generate_csv_report(data, filename, headers)
-#             elif export_format == 'pdf':
-#                 headers = ['Vendor', 'Transactions', 'Total Commission', 'Average Commission']
-#                 data = []
-#                 for vendor in vendor_stats:
-#                     data.append([
-#                         vendor['vendor_username'],
-#                         vendor['total_transactions'],
-#                         f"RWF {vendor['total_commission']:,.1f}",
-#                         f"RWF {vendor['avg_commission']:,.1f}"
-#                     ])
-#                 summary_data = {
-#                     'Total Transactions': total_transactions,
-#                     'Total Commission': f"RWF {total_commission:,.1f}",
-#                     'Monthly Commission': f"RWF {monthly_commission:,.1f}",
-#                     'Commission Rate': '20% + Delivery Fees',
-#                     'Report Generated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-#                 }
-#                 filename = f"agaseke_commission_{request.user.username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-#                 title = f"agaseke Commission Report - {request.user.get_full_name() or request.user.username}"
-#                 return generate_pdf_report(data, filename, title, headers, summary_data)
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return JsonResponse({'error': 'User not found'}, status=404)
         
-#         context = {
-#             'user_type': 'agaseke',
-#             'total_transactions': total_transactions,
-#             'total_commission': total_commission,
-#             'monthly_commission': monthly_commission,
-#             'monthly_transactions': monthly_purchases.count(),
-#             'commission_breakdown': commission_breakdown,
-#             'vendor_stats': vendor_stats,
-#             'recent_transactions': recent_transactions,
-#             'commission_rate': 20,  # agaseke gets 20%
-#             'vendor_rate': 80,      # Vendor gets 80%
-#         }
+        # Create and send OTP
+        otp_result = create_otp(user, 'purchase_confirmation')
+        print(otp_result)
         
-#     else:
-#         # Regular user - show their purchase history
-#         purchases = Purchase.objects.filter(
-#             buyer=request.user,
-#             status='completed'
-#         ).select_related('product', 'product__user')
+        if not otp_result.get('email_sent'):
+            return JsonResponse({'error': 'Failed to send OTP email'}, status=500)
         
-#         total_spent = purchases.aggregate(
-#             total=Sum('purchase_price')
-#         )['total'] or 0
+        return JsonResponse({
+            'success': True,
+            'message': f'OTP sent to {user.email}',
+            'session_id': otp_result.get('otp_id')
+        })
+    except Exception as e:
+        return JsonResponse({'error': f'Error processing request: {str(e)}'}, status=500)
+
+@csrf_exempt
+@require_http_methods(['POST'])
+def verify_otp_view(request):
+    """API endpoint to verify OTP for purchase confirmation"""
+    # Get user from token (for API authentication)
+    user = get_token_user(request)
+    if not user:
+        return JsonResponse({
+            'error': 'Authentication required'
+        }, status=401)
+    
+    if not user.is_agaseke():
+        return JsonResponse({'error': 'Access denied. agaseke role required.'}, status=403)
+    
+    try:
+        data = json.loads(request.body)
+        user_id = data.get('user_id')
+        otp_code = data.get('otp_code')
+        purchase_id = data.get('purchase_id')
         
-#         monthly_purchases = purchases.filter(
-#             created_at__month=timezone.now().month,
-#             created_at__year=timezone.now().year
-#         )
-#         monthly_spent = monthly_purchases.aggregate(
-#             total=Sum('purchase_price')
-#         )['total'] or 0
+        if not all([user_id, otp_code]):
+            return JsonResponse({'error': 'Missing required fields'}, status=400)
         
-#         # Handle export for customer
-#         if export_format in ['csv', 'pdf']:
-#             headers = ['Product', 'Seller', 'Date', 'Price', 'Status']
-#             data = []
-#             for purchase in purchases:
-#                 data.append([
-#                     purchase.product.title,
-#                     f"{purchase.product.user.first_name} {purchase.product.user.last_name}",
-#                     purchase.created_at.strftime('%Y-%m-%d %H:%M'),
-#                     f"RWF {purchase.purchase_price:,.1f}",
-#                     purchase.status.title()
-#                 ])
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return JsonResponse({'error': 'User not found'}, status=404)
+        
+        # Verify OTP using the utility function
+        otp_result = verify_otp_util(user, otp_code, 'purchase_confirmation')
+        
+        if not otp_result.get('valid'):
+            return JsonResponse({'error': otp_result.get('error', 'Invalid OTP')}, status=400)
+        
+        return JsonResponse({
+            'success': True,
+            'message': 'OTP verified successfully',
+            'purchase_id': purchase_id  # Include purchase_id in response for frontend
+        })
+    except Exception as e:
+        return JsonResponse({'error': f'Error processing request: {str(e)}'}, status=500)
+
+@csrf_exempt
+@require_http_methods(['POST'])
+def complete_purchase_pickup(request):
+    """API endpoint to complete purchase pickup after OTP verification"""
+    # Get user from token (for API authentication)
+    agaseke_user = get_token_user(request)
+    if not agaseke_user:
+        return JsonResponse({
+            'error': 'Authentication required'
+        }, status=401)
+    
+    if not agaseke_user.is_agaseke():
+        return JsonResponse({'error': 'Access denied. agaseke role required.'}, status=403)
+    
+    try:
+        data = json.loads(request.body)
+        purchase_id = data.get('purchase_id')
+        
+        print(f"DEBUG: Received purchase completion request with purchase_id: {purchase_id}")
+        print(f"DEBUG: Request data: {data}")
+        
+        if not purchase_id:
+            print("DEBUG: Missing purchase_id in request")
+            return JsonResponse({'error': 'Missing purchase_id'}, status=400)
+        
+        try:
+            purchase = Purchase.objects.get(id=purchase_id)
+            print(f"DEBUG: Found purchase with ID {purchase_id}")
+            print(f"DEBUG: Purchase status: {purchase.status}")
+            print(f"DEBUG: Purchase details: Order ID: {purchase.order_id}, Product: {purchase.product.title}")
+        except Purchase.DoesNotExist:
+            print(f"DEBUG: Purchase with ID {purchase_id} not found")
+            return JsonResponse({'error': 'Purchase not found'}, status=404)
+        
+        # Check if purchase is awaiting pickup or delivery
+        if purchase.status not in ['awaiting_pickup', 'awaiting_delivery']:
+            print(f"DEBUG: Invalid purchase status. Expected 'awaiting_pickup' or 'awaiting_delivery', got '{purchase.status}'")
+            return JsonResponse({'error': f'Invalid purchase status: {purchase.status}. Expected: awaiting_pickup or awaiting_delivery'}, status=400)
+        
+        # Complete the purchase
+        purchase.status = 'completed'
+        purchase.agaseke_user = agaseke_user
+        purchase.pickup_confirmed_at = timezone.now()
+        purchase.save()
+        
+        # Update vendor and buyer stats
+        vendor = purchase.product.user
+        vendor.total_sales += purchase.vendor_payment_amount
+        vendor.save()
+        
+        buyer = purchase.buyer
+        buyer.total_purchases += (purchase.purchase_price * purchase.quantity)
+        buyer.save()
+        
+        # Regenerate buyer's QR code to remove completed purchase
+        try:
+            from .qr_utils import update_user_qr_code
+            update_user_qr_code(buyer)
+            print(f"DEBUG: Updated QR code for buyer {buyer.username}")
+        except Exception as e:
+            print(f"DEBUG: Failed to update QR code for buyer: {str(e)}")
+        
+        return JsonResponse({
+            'success': True,
+            'message': 'Purchase confirmed successfully!',
+            'vendor_payment': str(purchase.vendor_payment_amount),
+            'agaseke_commission': str(purchase.agaseke_commission_amount)
+        })
+    except Exception as e:
+        return JsonResponse({'error': f'Error processing request: {str(e)}'}, status=500)
+
+@csrf_exempt
+@require_http_methods(['POST'])
+def complete_purchases_bulk(request):
+    """API endpoint to complete multiple purchases at once after OTP verification"""
+    # Get user from token (for API authentication)
+    agaseke_user = get_token_user(request)
+    if not agaseke_user:
+        return JsonResponse({
+            'error': 'Authentication required',
+            'completed': [],
+            'failed': []
+        }, status=401)
+    
+    if not agaseke_user.is_agaseke():
+        return JsonResponse({
+            'error': 'Access denied. agaseke role required.',
+            'completed': [],
+            'failed': []
+        }, status=403)
+    
+    try:
+        from django.db import transaction
+        from decimal import Decimal
+        
+        data = json.loads(request.body)
+        purchase_ids = data.get('purchase_ids', [])
+        
+        if not purchase_ids:
+            return JsonResponse({
+                'error': 'No purchase IDs provided',
+                'completed': [],
+                'failed': []
+            }, status=400)
+        
+        if not isinstance(purchase_ids, list):
+            return JsonResponse({
+                'error': 'purchase_ids must be an array',
+                'completed': [],
+                'failed': []
+            }, status=400)
+        
+        # Fetch all purchases
+        purchases = Purchase.objects.filter(id__in=purchase_ids).select_related('buyer', 'product', 'product__user')
+        
+        if not purchases.exists():
+            return JsonResponse({
+                'error': 'No valid purchases found',
+                'completed': [],
+                'failed': []
+            }, status=404)
+        
+        # Validate all purchases belong to the same buyer
+        buyer_ids = set(p.buyer_id for p in purchases)
+        if len(buyer_ids) > 1:
+            return JsonResponse({
+                'error': 'All purchases must belong to the same buyer',
+                'completed': [],
+                'failed': []
+            }, status=400)
+        
+        # Validate all purchases are in valid status
+        completed_purchases = []
+        failed_purchases = []
+        total_vendor_payment = Decimal('0.00')
+        total_agaseke_commission = Decimal('0.00')
+        
+        # Use atomic transaction to ensure all-or-nothing completion
+        with transaction.atomic():
+            for purchase in purchases:
+                try:
+                    # Check if purchase is awaiting pickup or delivery
+                    if purchase.status not in ['awaiting_pickup', 'awaiting_delivery']:
+                        failed_purchases.append({
+                            'purchase_id': purchase.id,
+                            'order_id': purchase.order_id,
+                            'error': f'Invalid status: {purchase.status}',
+                            'product': purchase.product.title
+                        })
+                        continue
+                    
+                    # Complete the purchase
+                    purchase.status = 'completed'
+                    purchase.agaseke_user = agaseke_user
+                    purchase.pickup_confirmed_at = timezone.now()
+                    purchase.save()
+                    
+                    # Update vendor stats
+                    vendor = purchase.product.user
+                    vendor.total_sales += purchase.vendor_payment_amount
+                    vendor.save()
+                    
+                    # Track totals
+                    total_vendor_payment += purchase.vendor_payment_amount
+                    total_agaseke_commission += purchase.agaseke_commission_amount
+                    
+                    completed_purchases.append({
+                        'purchase_id': purchase.id,
+                        'order_id': purchase.order_id,
+                        'product': purchase.product.title,
+                        'vendor_payment': str(purchase.vendor_payment_amount),
+                        'agaseke_commission': str(purchase.agaseke_commission_amount)
+                    })
+                    
+                except Exception as e:
+                    failed_purchases.append({
+                        'purchase_id': purchase.id,
+                        'order_id': getattr(purchase, 'order_id', 'N/A'),
+                        'error': str(e),
+                        'product': getattr(purchase.product, 'title', 'Unknown')
+                    })
             
-#             if export_format == 'csv':
-#                 filename = f"customer_purchases_{request.user.username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-#                 return generate_csv_report(data, filename, headers)
-#             elif export_format == 'pdf':
-#                 summary_data = {
-#                     'Total Purchases': purchases.count(),
-#                     'Total Spent': f"RWF {total_spent:,.1f}",
-#                     'Monthly Spent': f"RWF {monthly_spent:,.1f}",
-#                     'Report Generated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-#                 }
-#                 filename = f"customer_purchases_{request.user.username}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-#                 title = f"Customer Purchase Report - {request.user.get_full_name() or request.user.username}"
-#                 return generate_pdf_report(data, filename, title, headers, summary_data)
+            # If at least one purchase was completed, update buyer stats
+            if completed_purchases:
+                buyer = purchases.first().buyer
+                total_buyer_spent = sum(p.purchase_price * p.quantity for p in purchases if p.status == 'completed')
+                buyer.total_purchases += total_buyer_spent
+                buyer.save()
         
-#         context = {
-#             'user_type': 'customer',
-#             'total_purchases': purchases.count(),
-#             'total_spent': total_spent,
-#             'monthly_spent': monthly_spent,
-#             'monthly_purchases': monthly_purchases.count(),
-#             'recent_transactions': purchases.order_by('-created_at')[:10],
-#         }
-    
-#     return render(request, 'authentication/sales_statistics.html', context)
+        # Regenerate buyer's QR code to remove completed purchases
+        if completed_purchases:
+            try:
+                from .qr_utils import update_user_qr_code
+                buyer = purchases.first().buyer
+                update_user_qr_code(buyer)
+            except Exception as e:
+                print(f"Failed to update QR code for buyer: {str(e)}")
+        
+        # Prepare response
+        response_data = {
+            'success': len(completed_purchases) > 0,
+            'message': f'Completed {len(completed_purchases)} out of {len(purchase_ids)} purchases',
+            'summary': {
+                'total_completed': len(completed_purchases),
+                'total_failed': len(failed_purchases),
+                'total_vendor_payment': str(total_vendor_payment),
+                'total_agaseke_commission': str(total_agaseke_commission)
+            },
+            'completed': completed_purchases,
+            'failed': failed_purchases
+        }
+        
+        # Determine HTTP status code
+        if len(completed_purchases) == len(purchase_ids):
+            status_code = 200  # All succeeded
+        elif len(completed_purchases) > 0:
+            status_code = 207  # Partial success (Multi-Status)
+        else:
+            status_code = 400  # All failed
+        
+        return JsonResponse(response_data, status=status_code)
+        
+    except Exception as e:
+        import traceback
+        print('Error in complete_purchases_bulk:', traceback.format_exc())
+        return JsonResponse({
+            'error': f'Error processing request: {str(e)}',
+            'completed': [],
+            'failed': []
+        }, status=500)
 
-# @login_required
-# def vendor_statistics_for_agaseke(request, vendor_id):
-#     """agaseke users can view detailed statistics for a specific vendor"""
-#     if not request.user.is_agaseke():
-#         messages.error(request, 'Access denied. agaseke role required.')
-#         return redirect('dashboard')
+@csrf_exempt
+def get_vendor_statistics_modal(request, vendor_id):
+    """API endpoint to get vendor statistics for modal popup"""
+    if request.method != 'GET':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
     
-#     # Get the vendor
-#     vendor = get_object_or_404(User, id=vendor_id, is_vendor_role=True)
+    if not request.user.is_authenticated or not request.user.is_agaseke():
+        return JsonResponse({'error': 'Access denied'}, status=403)
     
-#     # Get all purchases for this vendor
-#     purchases = Purchase.objects.filter(
-#         product__user=vendor,
-#         status='completed'
-#     ).select_related('product', 'buyer', 'agaseke_user')
+    try:
+        # Get the vendor
+        vendor = User.objects.get(id=vendor_id, is_vendor_role=True)
+        
+        # Get all purchases for this vendor
+        purchases = Purchase.objects.filter(
+            product__user=vendor,
+            status='completed'
+        ).select_related('product', 'buyer', 'agaseke_user')
+        
+        # Calculate vendor statistics
+        total_sales = purchases.count()
+        total_revenue = purchases.aggregate(
+            total=Sum('vendor_payment_amount')
+        )['total'] or 0
+        
+        # Monthly statistics
+        current_month = timezone.now().month
+        current_year = timezone.now().year
+        monthly_purchases = purchases.filter(
+            pickup_confirmed_at__month=current_month,
+            pickup_confirmed_at__year=current_year
+        )
+        monthly_revenue = monthly_purchases.aggregate(
+            total=Sum('vendor_payment_amount')
+        )['total'] or 0
+        
+        # Product-wise breakdown
+        product_stats = list(purchases.values('product__title').annotate(
+            total_sales=Count('id'),
+            total_revenue=Sum('vendor_payment_amount'),
+            avg_price=Avg('vendor_payment_amount')
+        ).order_by('-total_revenue')[:5])  # Limit to top 5 products
+        
+        # agaseke commission from this vendor
+        agaseke_commission = purchases.aggregate(
+            total=Sum('agaseke_commission_amount')
+        )['total'] or 0
+        
+        # Monthly agaseke commission
+        monthly_agaseke_commission = monthly_purchases.aggregate(
+            total=Sum('agaseke_commission_amount')
+        )['total'] or 0
+        
+        # Recent transactions
+        recent_transactions = list(purchases.order_by('-pickup_confirmed_at')[:5].values(
+            'product__title', 'buyer__username', 'order_id', 'quantity', 
+            'vendor_payment_amount', 'pickup_confirmed_at', 'created_at'
+        ))
+        
+        # Commission breakdown
+        total_product_price = purchases.aggregate(total=Sum('purchase_price'))['total'] or 0
+        total_delivery_fees = purchases.aggregate(total=Sum('delivery_fee'))['total'] or 0
+        
+        commission_breakdown = {
+            'vendor_earnings': float(total_revenue),
+            'agaseke_commission': float(agaseke_commission),
+            'product_commission': float(total_product_price * Decimal('0.2')),
+            'delivery_fees': float(total_delivery_fees),
+            'total_transaction_value': float(total_product_price + total_delivery_fees)
+        }
+        
+        # Format dates for JSON serialization
+        for transaction in recent_transactions:
+            if transaction['pickup_confirmed_at']:
+                transaction['pickup_confirmed_at'] = transaction['pickup_confirmed_at'].strftime('%b %d, %H:%M')
+            else:
+                transaction['pickup_confirmed_at'] = transaction['created_at'].strftime('%b %d, %H:%M')
+            transaction['created_at'] = transaction['created_at'].strftime('%b %d, %H:%M')
+        
+        data = {
+            'vendor': {
+                'id': vendor.id,
+                'username': vendor.username,
+                'email': vendor.email
+            },
+            'statistics': {
+                'total_sales': total_sales,
+                'total_revenue': float(total_revenue),
+                'monthly_revenue': float(monthly_revenue),
+                'monthly_sales': monthly_purchases.count(),
+                'agaseke_commission': float(agaseke_commission),
+                'monthly_agaseke_commission': float(monthly_agaseke_commission),
+                'commission_rate': 80,
+                'agaseke_rate': 20
+            },
+            'product_stats': product_stats,
+            'recent_transactions': recent_transactions,
+            'commission_breakdown': commission_breakdown
+        }
+        
+        return JsonResponse(data)
+        
+    except User.DoesNotExist:
+        return JsonResponse({'error': 'Vendor not found'}, status=404)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+@csrf_exempt
+@require_http_methods(['GET'])
+def get_all_vendors_api(request):
+    """API endpoint for agaseke agents to get list of all vendors"""
+    # Get user from token (for API authentication)
+    user = get_token_user(request)
+    if not user:
+        return JsonResponse({
+            'error': 'Authentication required'
+        }, status=401)
     
-#     # Calculate vendor statistics (as if agaseke is viewing the vendor's dashboard)
-#     total_sales = purchases.count()
-#     total_revenue = purchases.aggregate(
-#         total=Sum('vendor_payment_amount')
-#     )['total'] or 0
+    if not user.is_agaseke():
+        return JsonResponse({'error': 'Access denied. agaseke role required.'}, status=403)
     
-#     # Monthly statistics
-#     current_month = timezone.now().month
-#     current_year = timezone.now().year
-#     monthly_purchases = purchases.filter(
-#         pickup_confirmed_at__month=current_month,
-#         pickup_confirmed_at__year=current_year
-#     )
-#     monthly_revenue = monthly_purchases.aggregate(
-#         total=Sum('vendor_payment_amount')
-#     )['total'] or 0
+    try:
+        from django.core.paginator import Paginator
+        
+        # Get query parameters
+        page = int(request.GET.get('page', 1))
+        limit = min(int(request.GET.get('limit', 20)), 100)  # Max 100 per page
+        search_query = request.GET.get('search', '').strip()
+        sort_by = request.GET.get('sort', '-total_sales')  # Default: highest sales first
+        
+        # Get all vendors
+        vendors = User.objects.filter(is_vendor_role=True)
+        
+        # Apply search filter
+        if search_query:
+            from django.db.models import Q
+            vendors = vendors.filter(
+                Q(username__icontains=search_query) |
+                Q(first_name__icontains=search_query) |
+                Q(last_name__icontains=search_query) |
+                Q(email__icontains=search_query)
+            )
+        
+        # Apply sorting
+        valid_sorts = ['total_sales', '-total_sales', 'username', '-username', 'date_joined', '-date_joined']
+        if sort_by in valid_sorts:
+            vendors = vendors.order_by(sort_by)
+        else:
+            vendors = vendors.order_by('-total_sales')
+        
+        # Paginate
+        paginator = Paginator(vendors, limit)
+        page_obj = paginator.get_page(page)
+        
+        # Serialize vendor data
+        vendors_data = []
+        for vendor in page_obj:
+            # Get vendor statistics
+            vendor_purchases = Purchase.objects.filter(
+                product__user=vendor,
+                status='completed'
+            )
+            
+            total_sales = vendor_purchases.count()
+            total_products = Post.objects.filter(user=vendor).count()
+            in_stock_products = Post.objects.filter(user=vendor, inventory__gt=0).count()
+            
+            # Calculate monthly stats
+            current_month = timezone.now().month
+            current_year = timezone.now().year
+            monthly_sales = vendor_purchases.filter(
+                pickup_confirmed_at__month=current_month,
+                pickup_confirmed_at__year=current_year
+            ).count()
+            
+            vendors_data.append({
+                'id': vendor.id,
+                'username': vendor.username,
+                'first_name': vendor.first_name,
+                'last_name': vendor.last_name,
+                'email': vendor.email,
+                'phone_number': vendor.phone_number,
+                'profile_picture': vendor.profile_picture.url if vendor.profile_picture else None,
+                'date_joined': vendor.date_joined.isoformat(),
+                'statistics': {
+                    'total_sales': total_sales,
+                    'total_revenue': float(vendor.total_sales),
+                    'total_products': total_products,
+                    'in_stock_products': in_stock_products,
+                    'monthly_sales': monthly_sales
+                }
+            })
+        
+        return JsonResponse({
+            'success': True,
+            'data': {
+                'vendors': vendors_data,
+                'pagination': {
+                    'current_page': page_obj.number,
+                    'total_pages': paginator.num_pages,
+                    'total_vendors': paginator.count,
+                    'has_next': page_obj.has_next(),
+                    'has_previous': page_obj.has_previous()
+                }
+            }
+        })
+        
+    except Exception as e:
+        import traceback
+        print('Error in get_all_vendors_api:', traceback.format_exc())
+        return JsonResponse({'error': f'Error processing request: {str(e)}'}, status=500)
+
+@csrf_exempt
+@require_http_methods(['GET'])
+def get_vendor_profile_api(request, vendor_id):
+    """API endpoint for agaseke agents to get detailed vendor profile"""
+    # Get user from token (for API authentication)
+    user = get_token_user(request)
+    if not user:
+        return JsonResponse({
+            'error': 'Authentication required'
+        }, status=401)
     
-#     # Product-wise breakdown
-#     product_stats = purchases.values('product__title').annotate(
-#         total_sales=Count('id'),
-#         total_revenue=Sum('vendor_payment_amount'),
-#         avg_price=Avg('vendor_payment_amount')
-#     ).order_by('-total_revenue')
+    if not user.is_agaseke():
+        return JsonResponse({'error': 'Access denied. agaseke role required.'}, status=403)
     
-#     # agaseke commission from this vendor
-#     agaseke_commission = purchases.aggregate(
-#         total=Sum('agaseke_commission_amount')
-#     )['total'] or 0
-    
-#     # Monthly agaseke commission
-#     monthly_agaseke_commission = monthly_purchases.aggregate(
-#         total=Sum('agaseke_commission_amount')
-#     )['total'] or 0
-    
-#     # Recent transactions
-#     recent_transactions = purchases.order_by('-pickup_confirmed_at')[:10]
-    
-#     # Commission breakdown
-#     total_product_price = purchases.aggregate(total=Sum('purchase_price'))['total'] or 0
-#     total_delivery_fees = purchases.aggregate(total=Sum('delivery_fee'))['total'] or 0
-    
-#     commission_breakdown = {
-#         'vendor_earnings': total_revenue,
-#         'agaseke_commission': agaseke_commission,
-#         'product_commission': total_product_price * Decimal('0.2'),
-#         'delivery_fees': total_delivery_fees,
-#         'total_transaction_value': total_product_price + total_delivery_fees
-#     }
-    
-#     context = {
-#         'vendor': vendor,
-#         'total_sales': total_sales,
-#         'total_revenue': total_revenue,
-#         'monthly_revenue': monthly_revenue,
-#         'monthly_sales': monthly_purchases.count(),
-#         'product_stats': product_stats,
-#         'recent_transactions': recent_transactions,
-#         'agaseke_commission': agaseke_commission,
-#         'monthly_agaseke_commission': monthly_agaseke_commission,
-#         'commission_breakdown': commission_breakdown,
-#         'commission_rate': 80,  # Vendor gets 80%
-#         'agaseke_rate': 20,   # agaseke gets 20%
-#     }
-    
-#     return render(request, 'authentication/vendor_statistics_for_agaseke.html', context)
+    try:
+        # Get the vendor
+        vendor = User.objects.get(id=vendor_id, is_vendor_role=True)
+        
+        # Get all purchases for this vendor
+        purchases = Purchase.objects.filter(
+            product__user=vendor,
+            status='completed'
+        ).select_related('product', 'buyer', 'agaseke_user')
+        
+        # Calculate vendor statistics
+        total_sales = purchases.count()
+        total_revenue = purchases.aggregate(
+            total=Sum('vendor_payment_amount')
+        )['total'] or 0
+        
+        # Monthly statistics
+        current_month = timezone.now().month
+        current_year = timezone.now().year
+        monthly_purchases = purchases.filter(
+            pickup_confirmed_at__month=current_month,
+            pickup_confirmed_at__year=current_year
+        )
+        monthly_revenue = monthly_purchases.aggregate(
+            total=Sum('vendor_payment_amount')
+        )['total'] or 0
+        monthly_sales = monthly_purchases.count()
+        
+        # Product statistics
+        all_products = Post.objects.filter(user=vendor)
+        total_products = all_products.count()
+        in_stock_products = all_products.filter(inventory__gt=0).count()
+        out_of_stock_products = all_products.filter(inventory=0).count()
+        
+        # Product-wise breakdown (top 10 products)
+        product_stats = list(purchases.values('product__id', 'product__title').annotate(
+            total_sales=Count('id'),
+            total_revenue=Sum('vendor_payment_amount'),
+            total_quantity=Sum('quantity')
+        ).order_by('-total_revenue')[:10])
+        
+        # agaseke commission from this vendor
+        agaseke_commission = purchases.aggregate(
+            total=Sum('agaseke_commission_amount')
+        )['total'] or 0
+        
+        # Monthly agaseke commission
+        monthly_agaseke_commission = monthly_purchases.aggregate(
+            total=Sum('agaseke_commission_amount')
+        )['total'] or 0
+        
+        # Recent transactions (last 20)
+        recent_transactions = []
+        for purchase in purchases.order_by('-pickup_confirmed_at')[:20]:
+            recent_transactions.append({
+                'purchase_id': purchase.id,
+                'order_id': purchase.order_id,
+                'product_title': purchase.product.title,
+                'buyer_username': purchase.buyer.username,
+                'quantity': purchase.quantity,
+                'vendor_payment': str(purchase.vendor_payment_amount),
+                'agaseke_commission': str(purchase.agaseke_commission_amount),
+                'pickup_confirmed_at': purchase.pickup_confirmed_at.isoformat() if purchase.pickup_confirmed_at else None,
+                'created_at': purchase.created_at.isoformat()
+            })
+        
+        # Weekly sales trend (last 7 days)
+        from datetime import timedelta
+        today = timezone.now().date()
+        weekly_trend = []
+        for i in range(6, -1, -1):
+            day = today - timedelta(days=i)
+            day_purchases = purchases.filter(
+                pickup_confirmed_at__date=day
+            )
+            weekly_trend.append({
+                'date': day.isoformat(),
+                'sales': day_purchases.count(),
+                'revenue': float(day_purchases.aggregate(total=Sum('vendor_payment_amount'))['total'] or 0)
+            })
+        
+        # Get vendor's products (limited to 10 recent)
+        from authentication.serializers_helpers import serialize_post
+        recent_products = all_products.order_by('-created_at')[:10]
+        products_data = [serialize_post(product, user) for product in recent_products]
+        
+        # Build response
+        data = {
+            'success': True,
+            'data': {
+                'vendor': {
+                    'id': vendor.id,
+                    'username': vendor.username,
+                    'first_name': vendor.first_name,
+                    'last_name': vendor.last_name,
+                    'email': vendor.email,
+                    'phone_number': vendor.phone_number,
+                    'profile_picture': vendor.profile_picture.url if vendor.profile_picture else None,
+                    'date_joined': vendor.date_joined.isoformat(),
+                    'is_vendor': True
+                },
+                'statistics': {
+                    'total_sales': total_sales,
+                    'total_revenue': str(total_revenue),
+                    'monthly_sales': monthly_sales,
+                    'monthly_revenue': str(monthly_revenue),
+                    'total_products': total_products,
+                    'in_stock_products': in_stock_products,
+                    'out_of_stock_products': out_of_stock_products,
+                    'agaseke_commission': str(agaseke_commission),
+                    'monthly_agaseke_commission': str(monthly_agaseke_commission)
+                },
+                'top_products': product_stats,
+                'recent_transactions': recent_transactions,
+                'weekly_trend': weekly_trend,
+                'recent_products': products_data
+            }
+        }
+        
+        return JsonResponse(data)
+        
+    except User.DoesNotExist:
+        return JsonResponse({'error': 'Vendor not found'}, status=404)
+    except Exception as e:
+        import traceback
+        print('Error in get_vendor_profile_api:', traceback.format_exc())
+        return JsonResponse({'error': f'Error processing request: {str(e)}'}, status=500)

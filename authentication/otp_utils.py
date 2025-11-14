@@ -12,8 +12,8 @@ def generate_otp():
     return ''.join(random.choices(string.digits, k=6))
 
 def send_otp_email(user, otp_code, purpose='purchase_confirmation'):
-    """Send OTP via email with beautiful HTML template"""
-    subject = '🔐 agaseke - Your Verification Code'
+    """Send OTP via email"""
+    subject = 'Agaseke - Your Verification Code'
     
     # Create HTML email template
     if purpose == 'purchase_confirmation':
@@ -35,7 +35,7 @@ def send_otp_email(user, otp_code, purpose='purchase_confirmation'):
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>agaseke Verification</title>
+        <title>Agaseke Verification</title>
         <style>
             * {{
                 margin: 0;
@@ -43,142 +43,152 @@ def send_otp_email(user, otp_code, purpose='purchase_confirmation'):
                 box-sizing: border-box;
             }}
             body {{
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
                 line-height: 1.6;
-                color: #333;
-                background-color: #f5f5f5;
+                color: #1a1a1a;
+                background-color: #f4f6f8;
+                padding: 20px 0;
             }}
             .email-container {{
                 max-width: 600px;
                 margin: 0 auto;
                 background-color: #ffffff;
-                border-radius: 12px;
+                border-radius: 8px;
                 overflow: hidden;
-                box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+                box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
             }}
             .header {{
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                background-color: #667eea;
                 color: white;
-                padding: 40px 30px;
+                padding: 32px 40px;
                 text-align: center;
             }}
             .header h1 {{
-                font-size: 28px;
-                font-weight: 700;
-                margin-bottom: 8px;
+                font-size: 24px;
+                font-weight: 600;
+                margin-bottom: 6px;
+                letter-spacing: -0.5px;
             }}
             .header p {{
-                font-size: 16px;
-                opacity: 0.9;
+                font-size: 15px;
+                opacity: 0.95;
                 margin-bottom: 0;
+                font-weight: 400;
             }}
             .content {{
-                padding: 40px 30px;
+                padding: 40px 40px 32px;
             }}
             .greeting {{
-                font-size: 18px;
+                font-size: 16px;
                 font-weight: 600;
-                color: #2c3e50;
-                margin-bottom: 20px;
+                color: #1a1a1a;
+                margin-bottom: 16px;
             }}
             .message {{
-                font-size: 16px;
-                color: #555;
-                margin-bottom: 30px;
-                line-height: 1.7;
+                font-size: 15px;
+                color: #4a5568;
+                margin-bottom: 32px;
+                line-height: 1.6;
             }}
-            .otp-container {{
-                background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-                border-radius: 12px;
-                padding: 30px;
+            .otp-section {{
+                background-color: #f8f9fa;
+                border: 2px solid #e2e8f0;
+                border-radius: 8px;
+                padding: 24px;
                 text-align: center;
-                margin: 30px 0;
-                border: 3px dashed #fff;
-                position: relative;
+                margin: 32px 0;
             }}
             .otp-label {{
-                color: white;
-                font-size: 14px;
+                color: #718096;
+                font-size: 13px;
                 font-weight: 600;
                 text-transform: uppercase;
-                letter-spacing: 1px;
-                margin-bottom: 15px;
-                opacity: 0.9;
+                letter-spacing: 0.5px;
+                margin-bottom: 12px;
             }}
             .otp-code {{
-                font-size: 36px;
-                font-weight: 800;
-                color: white;
-                letter-spacing: 8px;
-                margin: 0;
-                text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
-                font-family: 'Courier New', monospace;
-            }}
-            .expiry-notice {{
-                background-color: #fff3cd;
-                border: 1px solid #ffeaa7;
-                border-radius: 8px;
-                padding: 15px 20px;
-                margin: 25px 0;
-                color: #856404;
-                font-size: 14px;
-                display: flex;
-                align-items: center;
-            }}
-            .expiry-notice::before {{
-                content: "⏰";
-                font-size: 18px;
-                margin-right: 10px;
-            }}
-            .security-notice {{
-                background-color: #e8f4fd;
-                border: 1px solid #b6d7ff;
-                border-radius: 8px;
-                padding: 15px 20px;
-                margin: 25px 0;
-                color: #0c5460;
-                font-size: 14px;
-                display: flex;
-                align-items: center;
-            }}
-            .security-notice::before {{
-                content: "🔒";
-                font-size: 18px;
-                margin-right: 10px;
-            }}
-            .footer {{
-                background-color: #f8f9fa;
-                padding: 30px;
-                text-align: center;
-                border-top: 1px solid #e9ecef;
-            }}
-            .footer p {{
-                color: #6c757d;
-                font-size: 14px;
-                margin-bottom: 10px;
-            }}
-            .brand {{
-                color: #667eea;
+                font-size: 32px;
                 font-weight: 700;
-                font-size: 16px;
-                text-decoration: none;
+                color: #667eea;
+                letter-spacing: 10px;
+                margin: 12px 0;
+                font-family: 'Courier New', Consolas, Monaco, monospace;
+                user-select: all;
+                -webkit-user-select: all;
+                -moz-user-select: all;
+                -ms-user-select: all;
+                cursor: text;
+                padding: 8px 16px;
+                background-color: #ffffff;
+                border-radius: 4px;
+                display: inline-block;
+                border: 1px solid #cbd5e0;
+            }}
+            .otp-helper {{
+                font-size: 13px;
+                color: #718096;
+                margin-top: 12px;
+                font-style: italic;
+            }}
+            .info-box {{
+                background-color: #fef3c7;
+                border-left: 4px solid #f59e0b;
+                border-radius: 4px;
+                padding: 16px 20px;
+                margin: 24px 0;
+                font-size: 14px;
+                color: #92400e;
+            }}
+            .info-box strong {{
+                font-weight: 600;
+            }}
+            .security-box {{
+                background-color: #dbeafe;
+                border-left: 4px solid #3b82f6;
+                border-radius: 4px;
+                padding: 16px 20px;
+                margin: 24px 0;
+                font-size: 14px;
+                color: #1e40af;
             }}
             .divider {{
                 height: 1px;
-                background: linear-gradient(to right, transparent, #e9ecef, transparent);
-                margin: 25px 0;
+                background-color: #e2e8f0;
+                margin: 32px 0;
+            }}
+            .footer {{
+                background-color: #f8f9fa;
+                padding: 32px 40px;
+                text-align: center;
+                border-top: 1px solid #e2e8f0;
+            }}
+            .footer p {{
+                color: #718096;
+                font-size: 14px;
+                margin-bottom: 8px;
+                line-height: 1.5;
+            }}
+            .brand {{
+                color: #667eea;
+                font-weight: 600;
+                text-decoration: none;
+            }}
+            .copyright {{
+                margin-top: 16px;
+                font-size: 12px;
+                color: #a0aec0;
             }}
             @media (max-width: 600px) {{
                 .email-container {{
-                    margin: 10px;
-                    border-radius: 8px;
+                    margin: 0 10px;
+                    border-radius: 6px;
                 }}
                 .header, .content, .footer {{
-                    padding: 25px 20px;
+                    padding: 24px 20px;
                 }}
                 .otp-code {{
                     font-size: 28px;
-                    letter-spacing: 4px;
+                    letter-spacing: 8px;
                 }}
             }}
         </style>
@@ -186,43 +196,42 @@ def send_otp_email(user, otp_code, purpose='purchase_confirmation'):
     <body>
         <div class="email-container">
             <div class="header">
-                <h1>🛡️ agaseke</h1>
+                <h1>Agaseke</h1>
                 <p>{email_title}</p>
             </div>
             
             <div class="content">
-                <div class="greeting">Hello {user.first_name or user.username}! 👋</div>
+                <div class="greeting">Hello {user.first_name or user.username},</div>
                 
                 <div class="message">
                     {email_subtitle}. We've generated a secure verification code for you to {action_text}.
                 </div>
                 
-                <div class="otp-container">
+                <div class="otp-section">
                     <div class="otp-label">Your Verification Code</div>
                     <div class="otp-code">{otp_code}</div>
+                    <div class="otp-helper">Click or tap to select and copy</div>
                 </div>
                 
-                <div class="expiry-notice">
-                    This verification code will expire in <strong>5 minutes</strong> for your security.
+                <div class="info-box">
+                    <strong>Important:</strong> This verification code will expire in 5 minutes for your security.
                 </div>
                 
-                <div class="security-notice">
-                    If you didn't request this verification code, please ignore this email. Never share your verification codes with anyone.
+                <div class="security-box">
+                    <strong>Security Notice:</strong> If you didn't request this verification code, please ignore this email. Never share your verification codes with anyone.
                 </div>
                 
                 <div class="divider"></div>
                 
                 <div class="message">
-                    Need help? Feel free to contact our support team. We're here to assist you!
+                    If you need assistance, please contact our support team. We're here to help!
                 </div>
             </div>
             
             <div class="footer">
-                <p>This email was sent by <a href="#" class="brand">agaseke</a></p>
+                <p>This email was sent by <a href="#" class="brand">Agaseke</a></p>
                 <p>Your trusted marketplace for secure transactions</p>
-                <p style="margin-top: 15px; font-size: 12px; color: #868e96;">
-                    © 2025 agaseke. All rights reserved.
-                </p>
+                <p class="copyright">© 2025 Agaseke. All rights reserved.</p>
             </div>
         </div>
     </body>
@@ -231,20 +240,25 @@ def send_otp_email(user, otp_code, purpose='purchase_confirmation'):
     
     # Plain text version for email clients that don't support HTML
     text_content = f"""
-    agaseke - {email_title}
-    
-    Hello {user.first_name or user.username}!
-    
-    {email_subtitle}. Your verification code is:
-    
-    {otp_code}
-    
-    This code will expire in 5 minutes.
-    
-    If you didn't request this code, please ignore this email.
-    
-    Best regards,
-    agaseke Team
+Agaseke - {email_title}
+
+Hello {user.first_name or user.username},
+
+{email_subtitle}. Your verification code is:
+
+{otp_code}
+
+IMPORTANT: This code will expire in 5 minutes.
+
+SECURITY NOTICE: If you didn't request this code, please ignore this email. Never share your verification codes with anyone.
+
+If you need assistance, please contact our support team.
+
+Best regards,
+Agaseke Team
+
+---
+© 2025 Agaseke. All rights reserved.
     """
     
     try:

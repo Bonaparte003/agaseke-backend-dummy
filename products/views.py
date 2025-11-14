@@ -1,8 +1,7 @@
 from decimal import Decimal
+import json
 
-from django.shortcuts import render, redirect, get_object_or_404
-from django.contrib import messages
-from django.contrib.auth.decorators import login_required
+from django.shortcuts import get_object_or_404
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
@@ -11,8 +10,8 @@ from posts.models import Post, Bookmark, Category
 from products.models import Purchase, ProductImage
 from authentication.qr_utils import update_user_qr_code
 from authentication.utils import get_token_user
-from authentication.decorators import jwt_required
 from authentication.serializers_helpers import serialize_post, serialize_purchase
+
 
 @csrf_exempt
 @require_http_methods(['GET'])
@@ -50,109 +49,6 @@ def categories_api(request):
             'errors': {'server': [str(e)]}
         }, status=500)
 
-@login_required
-def purchase_product(request, post_id):
-    """Legacy HTML view - kept for backward compatibility"""
-    if request.method == 'POST':
-        product = get_object_or_404(Post, id=post_id)
-        
-        # Check if user is trying to buy their own product
-        if product.user == request.user:
-            messages.error(request, "You cannot purchase your own product.")
-            return redirect('post_detail', post_id=post_id)
-        
-        # Check if price is None or not set
-        if product.price is None:
-            messages.error(request, f'Unable to purchase {product.title}. The product does not have a valid price.')
-            return redirect('post_detail', post_id=post_id)
-        
-
-        # Check if product is out of stock
-        if product.inventory <= 0:
-            messages.error(request, f'Sorry, {product.title} is currently out of stock.')
-            return redirect('post_detail', post_id=post_id)
-        
-        # Get quantity from form
-        try:
-            quantity = int(request.POST.get('quantity', 1))
-            if quantity <= 0:
-                raise ValueError("Quantity must be positive")
-        except (ValueError, TypeError):
-            messages.error(request, "Please enter a valid quantity.")
-            return redirect('post_detail', post_id=post_id)
-        
-        # Check if enough inventory (with fresh data to prevent race conditions)
-        product.refresh_from_db()  # Get latest inventory data
-        if product.inventory < quantity:
-            if product.inventory == 0:
-                messages.error(request, f'Sorry, {product.title} is now out of stock.')
-            else:
-                messages.error(request, f'Sorry, there are only {product.inventory} items available.')
-            return redirect('post_detail', post_id=post_id)
-        
-        # Get delivery method and details
-        delivery_method = request.POST.get('delivery_method', 'pickup')
-        delivery_address = request.POST.get('delivery_address', '')
-        delivery_latitude = request.POST.get('delivery_latitude')
-        delivery_longitude = request.POST.get('delivery_longitude')
-        payment_method = request.POST.get('payment_method', 'momo')  # New payment method field
-        
-        # Calculate total price
-        total_price = product.price * quantity
-        delivery_fee = Decimal('5.00') if delivery_method == 'delivery' else Decimal('0.00')
-        
-        # Validate delivery details if delivery is selected
-        if delivery_method == 'delivery':
-            if not delivery_address:
-                messages.error(request, "Please provide a delivery address for home delivery.")
-                return redirect('post_detail', post_id=post_id)
-        
-        # Determine initial status based on delivery method
-        initial_status = 'awaiting_delivery' if delivery_method == 'delivery' else 'awaiting_pickup'
-        
-        # Create a new purchase with agaseke workflow
-        purchase = Purchase(
-            buyer=request.user,
-            product=product,
-            quantity=quantity,
-            purchase_price=total_price,
-            delivery_method=delivery_method,
-            payment_method=payment_method,
-            delivery_fee=delivery_fee,
-            delivery_address=delivery_address,
-            status=initial_status
-        )
-        
-        # Add location coordinates if provided
-        if delivery_latitude and delivery_longitude:
-            try:
-                purchase.delivery_latitude = float(delivery_latitude)
-                purchase.delivery_longitude = float(delivery_longitude)
-            except (ValueError, TypeError):
-                pass  # Ignore invalid coordinates
-        
-        purchase.save()
-        
-        # Update inventory immediately after successful purchase
-        product.inventory -= quantity
-        
-        # Update statistics
-        product.total_purchases += 1
-        product.save()
-        
-        # Update QR code to include this purchase
-        update_user_qr_code(request.user)
-        
-        # Success message based on delivery method
-        if delivery_method == 'delivery':
-            messages.success(request, f'You have successfully purchased {quantity} {product.title}! Total: RWF {total_price + delivery_fee:,.2f} (including RWF {delivery_fee:,.2f} delivery fee). agaseke will deliver to your address.')
-        else:
-            messages.success(request, f'You have successfully purchased {quantity} {product.title}! Please go to agaseke to collect your items.')
-        
-        return redirect('purchase_history')
-    
-    return redirect('post_detail', post_id=post_id)
-
 
 @csrf_exempt
 @require_http_methods(['POST'])
@@ -170,7 +66,6 @@ def purchase_product_api(request, post_id):
         
         # Parse request data
         try:
-            import json
             if request.content_type == 'application/json':
                 data = json.loads(request.body)
             else:
@@ -313,6 +208,7 @@ def purchase_product_api(request, post_id):
             'errors': {'server': [str(e)]}
         }, status=500)
 
+
 @csrf_exempt
 @require_http_methods(['POST'])
 def bulk_purchase_api(request):
@@ -340,8 +236,6 @@ def bulk_purchase_api(request):
     """
     try:
         from django.db import transaction
-        from decimal import Decimal
-        import json
         
         # Get user from token
         user = get_token_user(request)
@@ -598,75 +492,6 @@ def bulk_purchase_api(request):
         }, status=500)
 
 
-@login_required
-def create_product(request):
-    """Legacy HTML view - kept for backward compatibility"""
-    # Check if user has vendor role
-    if not request.user.is_vendor_role:
-        messages.error(request, 'You need to upgrade your account to Vendor status to create product listings.')
-        return redirect('user_settings')
-    
-    if request.method == 'POST':
-        title = request.POST.get('title')
-        description = request.POST.get('description')
-        main_image = request.FILES.get('main_image')
-        price = request.POST.get('price')
-        category = request.POST.get('category')
-        inventory = request.POST.get('inventory', 1)
-        
-        try:
-            inventory = int(inventory)
-            if inventory < 0:
-                inventory = 1
-        except (ValueError, TypeError):
-            inventory = 1
-        
-        if title and description and main_image and price:
-            # Get category object
-            category_obj = None
-            if category:
-                try:
-                    category_id = int(category)
-                    category_obj = Category.objects.get(id=category_id, is_active=True)
-                except (ValueError, Category.DoesNotExist):
-                    try:
-                        category_obj = Category.objects.get(slug=category, is_active=True)
-                    except Category.DoesNotExist:
-                        pass
-            
-            # Create the main product (no post_type needed since all posts are products now)
-            post = Post(
-                title=title,
-                description=description,
-                image=main_image,
-                user=request.user,
-                price=price,
-                category=category_obj,
-                inventory=inventory
-            )
-            post.save()
-            
-            # Process auxiliary images (limit to 5)
-            auxiliary_images = request.FILES.getlist('auxiliary_images')
-            print(f"DEBUG: Found {len(auxiliary_images)} auxiliary images in create_product")
-            max_images = min(len(auxiliary_images), 5)  # Limit to 5 images
-            
-            for i in range(max_images):
-                print(f"DEBUG: Creating auxiliary image {i+1} of {max_images}")
-                ProductImage.objects.create(
-                    product=post,
-                    image=auxiliary_images[i],
-                    display_order=i
-                )
-                
-            messages.success(request, 'Product listing created successfully!')
-            return redirect('dashboard')
-        else:
-            messages.error(request, 'Please fill all required fields')
-    
-    return render(request, 'authentication/create_product.html')
-
-
 @csrf_exempt
 @require_http_methods(['POST'])
 def create_product_api(request):
@@ -692,7 +517,6 @@ def create_product_api(request):
         # Parse request data (support both JSON and form-data for file uploads)
         if request.content_type and 'application/json' in request.content_type:
             try:
-                import json
                 data = json.loads(request.body)
             except json.JSONDecodeError:
                 return JsonResponse({
@@ -834,6 +658,7 @@ def create_product_api(request):
             'errors': {'server': [str(e)]}
         }, status=500)
 
+
 @csrf_exempt
 @require_http_methods(['PUT', 'PATCH'])
 def edit_product_api(request, post_id):
@@ -847,8 +672,6 @@ def edit_product_api(request, post_id):
     For image updates, use multipart/form-data.
     """
     try:
-        import json
-        
         # Get user from token
         user = get_token_user(request)
         if not user:
@@ -1055,6 +878,7 @@ def edit_product_api(request, post_id):
             'errors': {'server': [str(e)]}
         }, status=500)
 
+
 @csrf_exempt
 @require_http_methods(['DELETE', 'POST'])
 def delete_product_api(request, post_id):
@@ -1121,6 +945,7 @@ def delete_product_api(request, post_id):
             'message': 'Error deleting product',
             'errors': {'server': [str(e)]}
         }, status=500)
+
 
 @csrf_exempt
 @require_http_methods(['GET'])
@@ -1282,97 +1107,3 @@ def my_products_api(request):
             'message': 'Error retrieving products',
             'errors': {'server': [str(e)]}
         }, status=500)
-
-
-@login_required
-def edit_product(request, product_id):
-    # Check if user has vendor role
-    if not request.user.is_vendor_role:
-        messages.error(request, 'You need to have Vendor status to edit product listings.')
-        return redirect('dashboard')
-    
-    # Get the product (ensure it belongs to the user)
-    product = get_object_or_404(Post, id=product_id, user=request.user)
-    
-    # Business Rule: Check if product has been purchased or bookmarked
-    has_purchases = Purchase.objects.filter(product=product).exists()
-    has_bookmarks = Bookmark.objects.filter(post=product).exists()
-    
-    if has_purchases or has_bookmarks:
-        messages.error(request, 'This product cannot be edited as it has been purchased or bookmarked by customers.')
-        return redirect('vendor_dashboard')
-    
-    # Get existing auxiliary images
-    auxiliary_images = ProductImage.objects.filter(product=product).order_by('display_order')
-    
-    if request.method == 'POST':
-        title = request.POST.get('title')
-        description = request.POST.get('description')
-        price = request.POST.get('price')
-        category = request.POST.get('category')
-        inventory = request.POST.get('inventory')
-        
-        if title and description and price:
-            # Update product details
-            product.title = title
-            product.description = description
-            product.price = price
-            product.category = category
-            
-            # Update inventory if provided
-            if inventory:
-                try:
-                    inventory_value = int(inventory)
-                    if inventory_value >= 0:
-                        product.inventory = inventory_value
-                except (ValueError, TypeError):
-                    pass  # Keep existing inventory if invalid value
-            
-            # Handle main image update if provided
-            main_image = request.FILES.get('main_image')
-            if main_image:
-                product.image = main_image
-            
-            product.save()
-            
-            # Handle auxiliary images
-            # Check if any auxiliary images should be deleted
-            images_to_keep = request.POST.getlist('keep_auxiliary_image')
-            
-            # Delete images not in the keep list
-            for aux_image in auxiliary_images:
-                if str(aux_image.id) not in images_to_keep:
-                    aux_image.delete()
-            
-            # Count remaining images after deletion
-            remaining_images_count = ProductImage.objects.filter(product=product).count()
-            
-            # Calculate how many new images we can add
-            max_new_images = 5 - remaining_images_count
-            
-            if max_new_images > 0:
-                # Add new auxiliary images up to the allowed limit
-                new_auxiliary_images = request.FILES.getlist('auxiliary_images')
-                print(f"DEBUG: Found {len(new_auxiliary_images)} new auxiliary images")
-                max_to_add = min(len(new_auxiliary_images), max_new_images)
-                
-                for i in range(max_to_add):
-                    print(f"DEBUG: Creating auxiliary image {i+1} of {max_to_add}")
-                    ProductImage.objects.create(
-                        product=product,
-                        image=new_auxiliary_images[i],
-                        display_order=remaining_images_count + i
-                    )
-            
-            messages.success(request, 'Product updated successfully!')
-            return redirect('vendor_dashboard')
-        else:
-            messages.error(request, 'Please fill all required fields')
-    
-    context = {
-        'product': product,
-        'auxiliary_images': auxiliary_images
-    }
-    
-    return render(request, 'authentication/edit_product.html', context)
-
