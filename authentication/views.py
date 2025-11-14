@@ -310,7 +310,7 @@ def verify_login_otp_api(request):
         user = otp_record.user
         
         # Verify OTP
-        verification_result = verify_otp(user, otp_code, purpose='login', session_id=session_id)
+        verification_result = verify_otp_util(user, otp_code, purpose='login', session_id=session_id)
         
         if not verification_result['valid']:
             return JsonResponse({
