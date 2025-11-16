@@ -149,7 +149,8 @@ def register_api(request):
                         'email': user.email,
                         'first_name': user.first_name,
                         'last_name': user.last_name,
-                    'phone_number': user.phone_number
+                    'phone_number': user.phone_number,
+                    'profile_picture_url': None  # New users don't have profile picture yet
                     }
                 }
         }, status=201)
@@ -342,6 +343,7 @@ def verify_login_otp_api(request):
                     'role': user.role,
                     'is_vendor_role': user.is_vendor_role,
                     'phone_number': getattr(user, 'phone_number', '') or '',
+                    'profile_picture_url': user.profile_picture.url if user.profile_picture else None,
                     'last_login': user.last_login.isoformat() if user.last_login else None
                 },
                 'tokens': {
@@ -868,17 +870,17 @@ def get_purchases_by_qr(request):
         if not qr_data:
             return JsonResponse({'error': 'No QR data provided', 'purchases': []}, status=400)
         
-        # Decode QR data
-        decoded_data = decode_qr_data(qr_data.strip())
-        
-        if isinstance(decoded_data, dict) and 'error' in decoded_data:
+                # Decode QR data
+                decoded_data = decode_qr_data(qr_data.strip())
+                
+                if isinstance(decoded_data, dict) and 'error' in decoded_data:
             return JsonResponse({'error': decoded_data['error'], 'purchases': []}, status=400)
-        
-        # Get purchase information
-        purchase_info = get_user_purchases_from_qr(decoded_data)
-        
-        # If no purchases found or empty QR data
-        if not purchase_info.get('purchases'):
+                
+                # Get purchase information
+                purchase_info = get_user_purchases_from_qr(decoded_data)
+                
+                # If no purchases found or empty QR data
+                if not purchase_info.get('purchases'):
             # Still return user info if possible
             user_info = {}
             try:
@@ -962,7 +964,7 @@ def verify_buyer_credentials(request):
                 'email': user.email
             }
         })
-    except Exception as e:
+            except Exception as e:
         return JsonResponse({'error': f'Error processing request: {str(e)}'}, status=500)
 
 @csrf_exempt
@@ -998,9 +1000,9 @@ def send_otp(request):
         
         if not otp_result.get('email_sent'):
             return JsonResponse({'error': 'Failed to send OTP email'}, status=500)
-        
-        return JsonResponse({
-            'success': True,
+            
+            return JsonResponse({
+                'success': True,
             'message': f'OTP sent to {user.email}',
             'session_id': otp_result.get('otp_id')
         })
@@ -1014,7 +1016,7 @@ def verify_otp_view(request):
     # Get user from token (for API authentication)
     user = get_token_user(request)
     if not user:
-        return JsonResponse({
+                return JsonResponse({
             'error': 'Authentication required'
         }, status=401)
     
@@ -1041,7 +1043,7 @@ def verify_otp_view(request):
         if not otp_result.get('valid'):
             return JsonResponse({'error': otp_result.get('error', 'Invalid OTP')}, status=400)
         
-        return JsonResponse({
+                return JsonResponse({
             'success': True,
             'message': 'OTP verified successfully',
             'purchase_id': purchase_id  # Include purchase_id in response for frontend
@@ -1087,22 +1089,22 @@ def complete_purchase_pickup(request):
         if purchase.status not in ['awaiting_pickup', 'awaiting_delivery']:
             print(f"DEBUG: Invalid purchase status. Expected 'awaiting_pickup' or 'awaiting_delivery', got '{purchase.status}'")
             return JsonResponse({'error': f'Invalid purchase status: {purchase.status}. Expected: awaiting_pickup or awaiting_delivery'}, status=400)
-        
-        # Complete the purchase
-        purchase.status = 'completed'
+            
+            # Complete the purchase
+            purchase.status = 'completed'
         purchase.agaseke_user = agaseke_user
-        purchase.pickup_confirmed_at = timezone.now()
-        purchase.save()
-        
-        # Update vendor and buyer stats
-        vendor = purchase.product.user
-        vendor.total_sales += purchase.vendor_payment_amount
-        vendor.save()
-        
-        buyer = purchase.buyer
-        buyer.total_purchases += (purchase.purchase_price * purchase.quantity)
-        buyer.save()
-        
+            purchase.pickup_confirmed_at = timezone.now()
+            purchase.save()
+            
+            # Update vendor and buyer stats
+            vendor = purchase.product.user
+            vendor.total_sales += purchase.vendor_payment_amount
+            vendor.save()
+            
+            buyer = purchase.buyer
+            buyer.total_purchases += (purchase.purchase_price * purchase.quantity)
+            buyer.save()
+            
         # Regenerate buyer's QR code to remove completed purchase
         try:
             from .qr_utils import update_user_qr_code
@@ -1110,13 +1112,13 @@ def complete_purchase_pickup(request):
             print(f"DEBUG: Updated QR code for buyer {buyer.username}")
         except Exception as e:
             print(f"DEBUG: Failed to update QR code for buyer: {str(e)}")
-        
-        return JsonResponse({
-            'success': True,
-            'message': 'Purchase confirmed successfully!',
-            'vendor_payment': str(purchase.vendor_payment_amount),
-            'agaseke_commission': str(purchase.agaseke_commission_amount)
-        })
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'Purchase confirmed successfully!',
+                'vendor_payment': str(purchase.vendor_payment_amount),
+                'agaseke_commission': str(purchase.agaseke_commission_amount)
+            })
     except Exception as e:
         return JsonResponse({'error': f'Error processing request: {str(e)}'}, status=500)
 
@@ -1174,7 +1176,7 @@ def complete_purchases_bulk(request):
         # Validate all purchases belong to the same buyer
         buyer_ids = set(p.buyer_id for p in purchases)
         if len(buyer_ids) > 1:
-            return JsonResponse({
+                return JsonResponse({
                 'error': 'All purchases must belong to the same buyer',
                 'completed': [],
                 'failed': []
@@ -1201,16 +1203,16 @@ def complete_purchases_bulk(request):
                         continue
                     
                     # Complete the purchase
-                    purchase.status = 'completed'
+            purchase.status = 'completed'
                     purchase.agaseke_user = agaseke_user
                     purchase.pickup_confirmed_at = timezone.now()
-                    purchase.save()
-                    
+            purchase.save()
+            
                     # Update vendor stats
-                    vendor = purchase.product.user
-                    vendor.total_sales += purchase.vendor_payment_amount
-                    vendor.save()
-                    
+            vendor = purchase.product.user
+            vendor.total_sales += purchase.vendor_payment_amount
+            vendor.save()
+            
                     # Track totals
                     total_vendor_payment += purchase.vendor_payment_amount
                     total_agaseke_commission += purchase.agaseke_commission_amount
@@ -1219,10 +1221,10 @@ def complete_purchases_bulk(request):
                         'purchase_id': purchase.id,
                         'order_id': purchase.order_id,
                         'product': purchase.product.title,
-                        'vendor_payment': str(purchase.vendor_payment_amount),
-                        'agaseke_commission': str(purchase.agaseke_commission_amount)
-                    })
-                    
+                'vendor_payment': str(purchase.vendor_payment_amount),
+                'agaseke_commission': str(purchase.agaseke_commission_amount)
+            })
+    
                 except Exception as e:
                     failed_purchases.append({
                         'purchase_id': purchase.id,
@@ -1392,12 +1394,12 @@ def get_vendor_statistics_modal(request, vendor_id):
 def get_all_vendors_api(request):
     """API endpoint for agaseke agents to get list of all vendors"""
     # Get user from token (for API authentication)
-    user = get_token_user(request)
-    if not user:
-        return JsonResponse({
+        user = get_token_user(request)
+        if not user:
+            return JsonResponse({
             'error': 'Authentication required'
-        }, status=401)
-    
+            }, status=401)
+        
     if not user.is_agaseke():
         return JsonResponse({'error': 'Access denied. agaseke role required.'}, status=403)
     
