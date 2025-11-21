@@ -23,6 +23,7 @@ from django.conf.urls.static import static
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('auth/', include('authentication.urls')),
+    path('notifications/', include('notifications.urls')),
     # Add a redirect from home to login page
     path('', lambda request: redirect('login')),
 ]
