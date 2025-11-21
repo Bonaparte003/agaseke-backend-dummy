@@ -7,7 +7,7 @@ import json
 import logging
 
 from .models import FCMDevice, Notification, NotificationPreferences
-from .fcm_utils import send_notification_to_user, test_fcm_notification
+from .fcm_utils import send_notification_to_user, test_fcm_notification, resend_pending_notifications
 from authentication.decorators import jwt_required
 
 logger = logging.getLogger(__name__)
@@ -72,7 +72,16 @@ def register_device(request):
                 prefs.notifications_enabled = True
                 prefs.save()
         
-        return JsonResponse({
+        # Resend any pending notifications that failed previously
+        pending_result = None
+        try:
+            pending_result = resend_pending_notifications(user)
+            if pending_result['success_count'] > 0:
+                logger.info(f"Successfully resent {pending_result['success_count']} pending notifications to {user.username}")
+        except Exception as e:
+            logger.error(f"Error resending pending notifications: {e}", exc_info=True)
+        
+        response_data = {
             'success': True,
             'message': 'Device registered successfully' if created else 'Device updated successfully',
             'device': {
@@ -83,7 +92,17 @@ def register_device(request):
                 'created_at': device.created_at.isoformat()
             },
             'notification_enabled': prefs.notifications_enabled
-        }, status=201 if created else 200)
+        }
+        
+        # Include pending notifications info if any were resent
+        if pending_result and pending_result['attempted'] > 0:
+            response_data['pending_notifications'] = {
+                'total': pending_result['total_pending'],
+                'resent': pending_result['success_count'],
+                'failed': pending_result['failure_count']
+            }
+        
+        return JsonResponse(response_data, status=201 if created else 200)
         
     except json.JSONDecodeError:
         return JsonResponse({

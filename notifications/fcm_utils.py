@@ -252,6 +252,98 @@ def remove_invalid_tokens(failed_tokens: List[str]):
     logger.info(f"Marked {updated_count} invalid FCM tokens as inactive")
 
 
+def resend_pending_notifications(user) -> Dict:
+    """
+    Resend all pending notifications that failed to send via FCM.
+    This is typically called when a device is newly registered or comes back online.
+    
+    Args:
+        user: User instance
+    
+    Returns:
+        Dictionary with results: {
+            'total_pending': int,
+            'attempted': int,
+            'success_count': int,
+            'failure_count': int
+        }
+    """
+    from .models import Notification, FCMDevice
+    
+    # Get all notifications that haven't been successfully sent via FCM
+    pending_notifications = Notification.objects.filter(
+        user=user,
+        fcm_success=False
+    ).order_by('created_at')  # Oldest first
+    
+    total_pending = pending_notifications.count()
+    
+    if total_pending == 0:
+        logger.info(f"No pending notifications for user {user.username}")
+        return {
+            'total_pending': 0,
+            'attempted': 0,
+            'success_count': 0,
+            'failure_count': 0
+        }
+    
+    # Get active device tokens for this user
+    devices = FCMDevice.objects.filter(user=user, is_active=True)
+    device_tokens = list(devices.values_list('device_token', flat=True))
+    
+    if not device_tokens:
+        logger.info(f"No active devices found for user {user.username}, cannot resend")
+        return {
+            'total_pending': total_pending,
+            'attempted': 0,
+            'success_count': 0,
+            'failure_count': 0,
+            'error': 'No active devices'
+        }
+    
+    success_count = 0
+    failure_count = 0
+    
+    # Resend each notification
+    for notification in pending_notifications:
+        try:
+            # Send FCM notification
+            fcm_result = send_fcm_notification(
+                device_tokens=device_tokens,
+                title=notification.title,
+                body=notification.body,
+                data=notification.data
+            )
+            
+            # Update notification status
+            notification.fcm_sent = True
+            notification.fcm_success = fcm_result.get('success_count', 0) > 0
+            
+            if fcm_result.get('failure_count', 0) > 0:
+                notification.fcm_error = fcm_result.get('error', 'Failed to send to some devices')
+                failure_count += 1
+            else:
+                notification.fcm_error = None
+                success_count += 1
+            
+            notification.save(update_fields=['fcm_sent', 'fcm_success', 'fcm_error'])
+            
+        except Exception as e:
+            logger.error(f"Error resending notification {notification.id}: {e}")
+            notification.fcm_error = str(e)
+            notification.save(update_fields=['fcm_error'])
+            failure_count += 1
+    
+    logger.info(f"Resent {total_pending} notifications for user {user.username}. Success: {success_count}, Failed: {failure_count}")
+    
+    return {
+        'total_pending': total_pending,
+        'attempted': total_pending,
+        'success_count': success_count,
+        'failure_count': failure_count
+    }
+
+
 def test_fcm_notification(device_token: str) -> Dict:
     """
     Send a test notification to verify FCM is working.
