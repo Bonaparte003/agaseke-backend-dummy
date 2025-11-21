@@ -19,23 +19,38 @@ try:
     from firebase_admin import credentials, messaging
     
     FCM_AVAILABLE = True
+    logger.info("firebase-admin package imported successfully")
     
     # Initialize Firebase Admin SDK if credentials are provided
     if hasattr(settings, 'FCM_CREDENTIALS_FILE') and not firebase_admin._apps:
         try:
-            cred = credentials.Certificate(settings.FCM_CREDENTIALS_FILE)
-            firebase_admin.initialize_app(cred)
-            logger.info("Firebase Admin SDK initialized successfully")
+            import os
+            creds_path = settings.FCM_CREDENTIALS_FILE
+            
+            # Check if credentials file exists
+            if not os.path.exists(creds_path):
+                logger.error(f"FCM credentials file not found at: {creds_path}")
+                logger.error(f"Current working directory: {os.getcwd()}")
+                logger.error(f"BASE_DIR would be: {getattr(settings, 'BASE_DIR', 'NOT SET')}")
+                FCM_AVAILABLE = False
+            else:
+                logger.info(f"FCM credentials file found at: {creds_path}")
+                cred = credentials.Certificate(creds_path)
+                firebase_admin.initialize_app(cred)
+                logger.info("✓ Firebase Admin SDK initialized successfully")
         except Exception as e:
-            logger.error(f"Failed to initialize Firebase Admin SDK: {e}")
+            logger.error(f"✗ Failed to initialize Firebase Admin SDK: {e}", exc_info=True)
             FCM_AVAILABLE = False
     elif not hasattr(settings, 'FCM_CREDENTIALS_FILE'):
-        logger.warning("FCM_CREDENTIALS_FILE not set in settings. FCM notifications will not be sent.")
+        logger.error("✗ FCM_CREDENTIALS_FILE not set in settings.py. FCM notifications will not be sent.")
         FCM_AVAILABLE = False
+    elif firebase_admin._apps:
+        logger.info("✓ Firebase Admin SDK already initialized")
         
-except ImportError:
+except ImportError as e:
     FCM_AVAILABLE = False
-    logger.warning("firebase-admin not installed. FCM notifications will be disabled. Install with: pip install firebase-admin")
+    logger.error(f"✗ firebase-admin package not installed: {e}")
+    logger.error("Install with: pip install firebase-admin")
 
 
 def send_fcm_notification(
@@ -88,68 +103,137 @@ def send_fcm_notification(
     # Convert all data values to strings (FCM requirement)
     data = {k: str(v) for k, v in data.items()}
     
-    # Create the message
-    message = messaging.MulticastMessage(
-        notification=messaging.Notification(
-            title=title,
-            body=body,
-        ),
-        data=data,
-        android=messaging.AndroidConfig(
-            priority=priority,
-            notification=messaging.AndroidNotification(
-                sound='default',
-                click_action='FLUTTER_NOTIFICATION_CLICK',
-            ),
-        ),
-        apns=messaging.APNSConfig(
-            payload=messaging.APNSPayload(
-                aps=messaging.Aps(
-                    sound='default',
-                    badge=1,
-                ),
-            ),
-        ),
-        tokens=device_tokens,
-    )
-    
     try:
-        # Send the message
-        response = messaging.send_multicast(message)
+        # Check if send_multicast is available (firebase-admin >= 6.0.0)
+        if hasattr(messaging, 'send_multicast'):
+            # Use MulticastMessage for newer versions (more efficient)
+            message = messaging.MulticastMessage(
+                notification=messaging.Notification(
+                    title=title,
+                    body=body,
+                ),
+                data=data,
+                android=messaging.AndroidConfig(
+                    priority=priority,
+                    notification=messaging.AndroidNotification(
+                        sound='default',
+                        click_action='FLUTTER_NOTIFICATION_CLICK',
+                    ),
+                ),
+                apns=messaging.APNSConfig(
+                    payload=messaging.APNSPayload(
+                        aps=messaging.Aps(
+                            sound='default',
+                            badge=1,
+                        ),
+                    ),
+                ),
+                tokens=device_tokens,
+            )
+            
+            # Send the message
+            response = messaging.send_multicast(message)
+            
+            # Process responses
+            failed_tokens = []
+            responses = []
+            
+            for idx, resp in enumerate(response.responses):
+                if not resp.success:
+                    failed_tokens.append(device_tokens[idx])
+                    error_msg = f"Error: {resp.exception}" if resp.exception else "Unknown error"
+                    responses.append({
+                        'token': device_tokens[idx],
+                        'success': False,
+                        'error': error_msg
+                    })
+                    logger.error(f"Failed to send to {device_tokens[idx]}: {error_msg}")
+                else:
+                    responses.append({
+                        'token': device_tokens[idx],
+                        'success': True,
+                        'message_id': resp.message_id
+                    })
+            
+            result = {
+                'success_count': response.success_count,
+                'failure_count': response.failure_count,
+                'failed_tokens': failed_tokens,
+                'responses': responses
+            }
+            
+            logger.info(f"FCM notification sent. Success: {response.success_count}, Failed: {response.failure_count}")
+            return result
         
-        # Process responses
-        failed_tokens = []
-        responses = []
-        
-        for idx, resp in enumerate(response.responses):
-            if not resp.success:
-                failed_tokens.append(device_tokens[idx])
-                error_msg = f"Error: {resp.exception}" if resp.exception else "Unknown error"
-                responses.append({
-                    'token': device_tokens[idx],
-                    'success': False,
-                    'error': error_msg
-                })
-                logger.error(f"Failed to send to {device_tokens[idx]}: {error_msg}")
-            else:
-                responses.append({
-                    'token': device_tokens[idx],
-                    'success': True,
-                    'message_id': resp.message_id
-                })
-        
-        result = {
-            'success_count': response.success_count,
-            'failure_count': response.failure_count,
-            'failed_tokens': failed_tokens,
-            'responses': responses
-        }
-        
-        logger.info(f"FCM notification sent. Success: {response.success_count}, Failed: {response.failure_count}")
-        return result
+        else:
+            # Fallback for older firebase-admin versions (< 6.0.0)
+            # Send messages individually
+            logger.info(f"Using legacy send() method for {len(device_tokens)} tokens (firebase-admin < 6.0.0)")
+            
+            success_count = 0
+            failure_count = 0
+            failed_tokens = []
+            responses = []
+            
+            for token in device_tokens:
+                try:
+                    # Create individual message
+                    message = messaging.Message(
+                        notification=messaging.Notification(
+                            title=title,
+                            body=body,
+                        ),
+                        data=data,
+                        android=messaging.AndroidConfig(
+                            priority=priority,
+                            notification=messaging.AndroidNotification(
+                                sound='default',
+                                click_action='FLUTTER_NOTIFICATION_CLICK',
+                            ),
+                        ),
+                        apns=messaging.APNSConfig(
+                            payload=messaging.APNSPayload(
+                                aps=messaging.Aps(
+                                    sound='default',
+                                    badge=1,
+                                ),
+                            ),
+                        ),
+                        token=token,
+                    )
+                    
+                    # Send individual message
+                    message_id = messaging.send(message)
+                    success_count += 1
+                    responses.append({
+                        'token': token,
+                        'success': True,
+                        'message_id': message_id
+                    })
+                    
+                except Exception as e:
+                    failure_count += 1
+                    failed_tokens.append(token)
+                    error_msg = str(e)
+                    responses.append({
+                        'token': token,
+                        'success': False,
+                        'error': error_msg
+                    })
+                    logger.error(f"Failed to send to {token}: {error_msg}")
+            
+            result = {
+                'success_count': success_count,
+                'failure_count': failure_count,
+                'failed_tokens': failed_tokens,
+                'responses': responses
+            }
+            
+            logger.info(f"FCM notification sent (legacy mode). Success: {success_count}, Failed: {failure_count}")
+            return result
         
     except Exception as e:
-        logger.error(f"Error sending FCM notification: {e}")
+        logger.error(f"Error sending FCM notification: {e}", exc_info=True)
         return {
             'success_count': 0,
             'failure_count': len(device_tokens),
