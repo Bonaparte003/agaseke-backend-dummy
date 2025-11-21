@@ -1,0 +1,271 @@
+"""
+FCM (Firebase Cloud Messaging) utility functions for sending push notifications.
+
+To use this module, you need to:
+1. Install firebase-admin: pip install firebase-admin
+2. Download your Firebase service account JSON file from Firebase Console
+3. Set the FCM_CREDENTIALS_FILE path in your settings.py
+"""
+
+import logging
+from typing import Dict, List, Optional
+from django.conf import settings
+
+logger = logging.getLogger(__name__)
+
+# Try to import firebase_admin, but don't fail if it's not installed
+try:
+    import firebase_admin
+    from firebase_admin import credentials, messaging
+    
+    FCM_AVAILABLE = True
+    
+    # Initialize Firebase Admin SDK if credentials are provided
+    if hasattr(settings, 'FCM_CREDENTIALS_FILE') and not firebase_admin._apps:
+        try:
+            cred = credentials.Certificate(settings.FCM_CREDENTIALS_FILE)
+            firebase_admin.initialize_app(cred)
+            logger.info("Firebase Admin SDK initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize Firebase Admin SDK: {e}")
+            FCM_AVAILABLE = False
+    elif not hasattr(settings, 'FCM_CREDENTIALS_FILE'):
+        logger.warning("FCM_CREDENTIALS_FILE not set in settings. FCM notifications will not be sent.")
+        FCM_AVAILABLE = False
+        
+except ImportError:
+    FCM_AVAILABLE = False
+    logger.warning("firebase-admin not installed. FCM notifications will be disabled. Install with: pip install firebase-admin")
+
+
+def send_fcm_notification(
+    device_tokens: List[str],
+    title: str,
+    body: str,
+    data: Optional[Dict] = None,
+    priority: str = 'high'
+) -> Dict:
+    """
+    Send FCM notification to one or more device tokens.
+    
+    Args:
+        device_tokens: List of FCM device tokens
+        title: Notification title
+        body: Notification body
+        data: Optional dictionary of additional data to send with notification
+        priority: Notification priority ('high' or 'normal')
+    
+    Returns:
+        Dictionary with results: {
+            'success_count': int,
+            'failure_count': int,
+            'failed_tokens': List[str],
+            'responses': List[dict]
+        }
+    """
+    if not FCM_AVAILABLE:
+        logger.warning("FCM is not available. Notification not sent.")
+        return {
+            'success_count': 0,
+            'failure_count': len(device_tokens),
+            'failed_tokens': device_tokens,
+            'error': 'FCM not configured or firebase-admin not installed'
+        }
+    
+    if not device_tokens:
+        logger.warning("No device tokens provided")
+        return {
+            'success_count': 0,
+            'failure_count': 0,
+            'failed_tokens': [],
+            'error': 'No device tokens provided'
+        }
+    
+    # Prepare notification data
+    if data is None:
+        data = {}
+    
+    # Convert all data values to strings (FCM requirement)
+    data = {k: str(v) for k, v in data.items()}
+    
+    # Create the message
+    message = messaging.MulticastMessage(
+        notification=messaging.Notification(
+            title=title,
+            body=body,
+        ),
+        data=data,
+        android=messaging.AndroidConfig(
+            priority=priority,
+            notification=messaging.AndroidNotification(
+                sound='default',
+                click_action='FLUTTER_NOTIFICATION_CLICK',
+            ),
+        ),
+        apns=messaging.APNSConfig(
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(
+                    sound='default',
+                    badge=1,
+                ),
+            ),
+        ),
+        tokens=device_tokens,
+    )
+    
+    try:
+        # Send the message
+        response = messaging.send_multicast(message)
+        
+        # Process responses
+        failed_tokens = []
+        responses = []
+        
+        for idx, resp in enumerate(response.responses):
+            if not resp.success:
+                failed_tokens.append(device_tokens[idx])
+                error_msg = f"Error: {resp.exception}" if resp.exception else "Unknown error"
+                responses.append({
+                    'token': device_tokens[idx],
+                    'success': False,
+                    'error': error_msg
+                })
+                logger.error(f"Failed to send to {device_tokens[idx]}: {error_msg}")
+            else:
+                responses.append({
+                    'token': device_tokens[idx],
+                    'success': True,
+                    'message_id': resp.message_id
+                })
+        
+        result = {
+            'success_count': response.success_count,
+            'failure_count': response.failure_count,
+            'failed_tokens': failed_tokens,
+            'responses': responses
+        }
+        
+        logger.info(f"FCM notification sent. Success: {response.success_count}, Failed: {response.failure_count}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error sending FCM notification: {e}")
+        return {
+            'success_count': 0,
+            'failure_count': len(device_tokens),
+            'failed_tokens': device_tokens,
+            'error': str(e)
+        }
+
+
+def send_notification_to_user(
+    user,
+    title: str,
+    body: str,
+    notification_type: str,
+    data: Optional[Dict] = None,
+    save_to_db: bool = True
+) -> Dict:
+    """
+    Send notification to a specific user (all their active devices).
+    
+    Args:
+        user: User instance
+        title: Notification title
+        body: Notification body
+        notification_type: Type of notification (from Notification.NOTIFICATION_TYPES)
+        data: Optional dictionary of additional data
+        save_to_db: Whether to save notification to database
+    
+    Returns:
+        Dictionary with FCM send results and notification instance (if saved)
+    """
+    from .models import FCMDevice, Notification, NotificationPreferences
+    
+    # Check if user has notifications enabled
+    try:
+        prefs = NotificationPreferences.objects.get(user=user)
+        if not prefs.notifications_enabled:
+            logger.info(f"Notifications disabled for user {user.username}")
+            return {
+                'success': False,
+                'error': 'Notifications disabled by user'
+            }
+    except NotificationPreferences.DoesNotExist:
+        # Create default preferences if they don't exist
+        prefs = NotificationPreferences.objects.create(user=user)
+    
+    # Get active device tokens for this user
+    devices = FCMDevice.objects.filter(user=user, is_active=True)
+    device_tokens = list(devices.values_list('device_token', flat=True))
+    
+    if not device_tokens:
+        logger.info(f"No active devices found for user {user.username}")
+    
+    # Send FCM notification
+    fcm_result = send_fcm_notification(
+        device_tokens=device_tokens,
+        title=title,
+        body=body,
+        data=data or {}
+    )
+    
+    # Save to database if requested
+    notification = None
+    if save_to_db:
+        notification = Notification.objects.create(
+            user=user,
+            notification_type=notification_type,
+            title=title,
+            body=body,
+            data=data or {},
+            already_sent=True,  # Mark as sent to prevent duplicates
+            fcm_sent=len(device_tokens) > 0,
+            fcm_success=fcm_result.get('success_count', 0) > 0,
+            fcm_error=fcm_result.get('error', '') if fcm_result.get('failure_count', 0) > 0 else None
+        )
+    
+    return {
+        'fcm_result': fcm_result,
+        'notification': notification,
+        'device_count': len(device_tokens)
+    }
+
+
+def remove_invalid_tokens(failed_tokens: List[str]):
+    """
+    Remove invalid/expired FCM tokens from the database.
+    
+    Args:
+        failed_tokens: List of FCM tokens that failed to receive notifications
+    """
+    from .models import FCMDevice
+    
+    if not failed_tokens:
+        return
+    
+    # Mark failed tokens as inactive
+    updated_count = FCMDevice.objects.filter(
+        device_token__in=failed_tokens
+    ).update(is_active=False)
+    
+    logger.info(f"Marked {updated_count} invalid FCM tokens as inactive")
+
+
+def test_fcm_notification(device_token: str) -> Dict:
+    """
+    Send a test notification to verify FCM is working.
+    
+    Args:
+        device_token: FCM device token to test
+    
+    Returns:
+        Dictionary with test results
+    """
+    return send_fcm_notification(
+        device_tokens=[device_token],
+        title="Test Notification",
+        body="This is a test notification from Agaseke",
+        data={'test': 'true'}
+    )
+
