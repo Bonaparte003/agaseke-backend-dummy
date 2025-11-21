@@ -1,33 +1,17 @@
 from django.contrib import admin
-from .models import FCMDevice, Notification, NotificationPreferences
-
-
-@admin.register(FCMDevice)
-class FCMDeviceAdmin(admin.ModelAdmin):
-    list_display = ['user', 'device_type', 'device_token_short', 'is_active', 'created_at']
-    list_filter = ['device_type', 'is_active', 'created_at']
-    search_fields = ['user__username', 'user__email', 'device_token', 'device_id']
-    readonly_fields = ['created_at', 'updated_at']
-    
-    def device_token_short(self, obj):
-        """Display truncated device token for readability"""
-        return f"{obj.device_token[:30]}..." if len(obj.device_token) > 30 else obj.device_token
-    device_token_short.short_description = 'Device Token'
+from .models import Notification, NotificationPreferences
 
 
 @admin.register(Notification)
 class NotificationAdmin(admin.ModelAdmin):
-    list_display = ['user', 'notification_type', 'title', 'seen', 'already_sent', 'fcm_success', 'created_at']
-    list_filter = ['notification_type', 'seen', 'already_sent', 'fcm_sent', 'fcm_success', 'created_at']
+    list_display = ['user', 'notification_type', 'title', 'seen', 'created_at']
+    list_filter = ['notification_type', 'seen', 'created_at']
     search_fields = ['user__username', 'user__email', 'title', 'body']
     readonly_fields = ['created_at', 'seen_at']
     
     fieldsets = (
         ('Notification Info', {
             'fields': ('user', 'notification_type', 'title', 'body', 'purchase')
-        }),
-        ('FCM Delivery', {
-            'fields': ('already_sent', 'fcm_sent', 'fcm_success', 'fcm_error')
         }),
         ('Seen Status', {
             'fields': ('seen', 'seen_at')

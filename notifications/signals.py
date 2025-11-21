@@ -5,7 +5,7 @@ Signals for automatically sending notifications when purchase events occur.
 from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 from products.models import Purchase
-from .fcm_utils import send_notification_to_user
+from .notification_utils import send_notification_to_user
 from .models import NotificationPreferences
 import logging
 
